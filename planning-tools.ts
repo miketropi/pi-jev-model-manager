@@ -3,6 +3,7 @@
  * No shell execution and no writes to the local project.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { curlGetResponse, curlErrorText } from "./curl-fetch.ts";
 
 export interface JevChoice {
   label: string;
@@ -36,23 +37,42 @@ export function checkedPublicUrl(input: string): URL {
   return url;
 }
 
-export interface ResearchResult { url: string; text: string; status: number }
+export interface ResearchResult { url: string; text: string; status: number; transport: "node-fetch" | "curl" }
 export async function fetchPublicText(
   input: string, fetcher: typeof fetch = fetch,
+  curlFallback: ((url: string) => Promise<Response>) | undefined =
+    (fetcher === fetch && process.env.JEV_WEB_FETCH_CURL !== "0" ? curlGetResponse : undefined),
 ): Promise<ResearchResult> {
   let url = checkedPublicUrl(input);
   const visited = new Set<string>();
   for (let hop = 0; hop < 4; hop++) {
     if (visited.has(url.href)) throw new Error("Redirect loop.");
     visited.add(url.href);
-    const res = await fetcher(url.href, {
-      method: "GET", redirect: "manual",
-      signal: AbortSignal.timeout(12000),
-      headers: {
-        "Accept": "application/json, text/plain, text/markdown, text/html, application/xml;q=0.9",
-        "User-Agent": "jev-model-manager/0.6.2 (read-only research)",
-      },
-    });
+    let res: Response;
+    let transport: "node-fetch" | "curl" = "node-fetch";
+    try {
+      res = await fetcher(url.href, {
+        method: "GET", redirect: "manual",
+        signal: AbortSignal.timeout(12000),
+        headers: {
+          "Accept": "application/json, text/plain, text/markdown, text/html, application/xml;q=0.9",
+          "User-Agent": "jev-model-manager/0.8.1 (read-only research)",
+        },
+      });
+    } catch (nodeError) {
+      const nodeMessage = curlErrorText(nodeError);
+      if (!curlFallback) throw Error("Node fetch transport failed: " + nodeMessage +
+        ". curl fallback unavailable or disabled (JEV_WEB_FETCH_CURL=0).");
+      try {
+        // Only fallback on transport exceptions. Never retry real HTTP 403/404/5xx.
+        // curl runs without a shell and without auto-following redirects.
+        res = await curlFallback(url.href);
+        transport = "curl";
+      } catch (curlError) {
+        throw Error("Node fetch failed (" + nodeMessage + "); curl fallback failed (" +
+          curlErrorText(curlError) + "). Check DNS, HTTPS_PROXY and TLS certificates.");
+      }
+    }
     if ([301, 302, 303, 307, 308].includes(res.status)) {
       const dest = res.headers.get("location");
       if (!dest) throw new Error("Redirect without Location header.");
@@ -98,6 +118,7 @@ export async function fetchPublicText(
       url: url.href,
       status: res.status,
       text: body.slice(0, 26000),
+      transport,
     };
   }
   throw new Error("Too many redirects.");
@@ -169,8 +190,8 @@ export function registerPlanningTools(pi: ExtensionAPI): void {
     async execute(_id, params) {
       try {
         const page = await fetchPublicText(params.url);
-        return {content: [{type: "text", text: `Source: ${page.url}\nHTTP ${page.status}\n\n${page.text}`}],
-          details: {url: page.url, status: page.status}};
+        return {content: [{type: "text", text: `Source: ${page.url}\nHTTP ${page.status} · transport: ${page.transport}\n\n${page.text}`}],
+          details: {url: page.url, status: page.status, transport: page.transport}};
       } catch (error) {
         return {isError: true, content: [{type: "text",
           text: `Web research unavailable: ${error instanceof Error ? error.message : "Unknown error"}`}]};

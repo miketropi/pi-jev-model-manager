@@ -296,6 +296,28 @@ The location respects `PI_CODING_AGENT_DIR`. Each file is privately permissioned
 
 Planning instructions now explicitly tell the agent **not to write any auxiliary plan.md/plan-*.md file into the repository**. Existing files a previous agent wrote into the project are not silently deleted, because they may contain user data. Review them and remove them manually if unwanted. A third-party extension or model tool could still write files on its own; Jev's plan-mode tool guard and explicit instructions limit, but cannot prevent, every possible external write.
 
+## Web Research Reliability & Diagnostics (v0.8.1)
+
+When planning current events, releases or documentation, Jev's `jev_web_fetch` first attempts Node's native `fetch()`. If **the transport throws** (for example, DNS lookup, TLS/certificate verification, proxy or connection timeout), Jev now automatically retries the **same validated public HTTPS URL** using the system's `curl` CLI. This is useful on macOS and Linux where system curl may honor `HTTPS_PROXY` and native system certificates while Node fetch cannot reach the same site.
+
+The fallback is strictly a **read-only GET**, launched with arguments (never shell string interpolation); it ignores local `.curlrc`, does not auto-follow redirects, enforces time/response limits and rejects nonpublic / non-HTTPS redirect targets. It never writes to the working directory. Regular HTTP responses such as 403/404/500 are **not** retried as a network failure. The fetched result reports `transport: node-fetch` or `transport: curl` to clarify what worked.
+
+### Verify connectivity from the Pi runtime
+
+```text
+/jev-web-check https://wordpress.org/news/2026/10/wordpress-7-1-4/
+```
+
+The command reports the final source URL, HTTP code, transport and fetched text length. With no URL it checks that WordPress article by default. During planning, `jev_web_fetch` returns diagnostic errors such as:
+
+```text
+Node fetch failed (ENOTFOUND: fetch failed);
+curl fallback failed (curl exited 60: SSL certificate problem).
+Check DNS, HTTPS_PROXY and TLS certificates.
+```
+
+If both methods fail, verify the machine's network/DNS, proxy configuration and certificate store. The addon cannot bypass a firewall or a site's rate limit. System curl must be installed for the fallback; you can disable it with `JEV_WEB_FETCH_CURL=0`. Do not disable TLS validation to work around certificate problems. Proxy credentials are not copied into logs intentionally, and the CLI uses an argument array without shell execution. Private-host validation is not a complete DNS-rebinding defense; do not treat Jev's web reader as a hardened general-purpose browser.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.

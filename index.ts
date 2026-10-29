@@ -9,7 +9,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules, type TaskType } from "./task-routing.ts";
 import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
-import { registerPlanningTools } from "./planning-tools.ts";
+import { registerPlanningTools, fetchPublicText } from "./planning-tools.ts";
 import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing.ts";
 import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
@@ -1535,6 +1535,23 @@ export default function (pi: ExtensionAPI) {
     handler:async (_args,ctx)=>{
       closeProgress(ctx);
       ctx.ui.notify("Checklist dismissed and temporary plan cache cleaned. Session history remains.","info");
+    },
+  });
+
+  pi.registerCommand("jev-web-check", {
+    description:"Diagnose public HTTPS access from the Pi runtime (Node fetch / curl fallback)",
+    handler: async (args, ctx) => {
+      const url = args.trim() || "https://wordpress.org/news/2026/10/wordpress-7-1-4/";
+      try {
+        const page = await fetchPublicText(url);
+        ctx.ui.notify("Jev web check OK · HTTP " + page.status +
+          " · transport " + page.transport + "\n" + page.url +
+          "\nReceived " + page.text.length + " text characters.", "info");
+      } catch(error) {
+        ctx.ui.notify("Jev web check FAILED · " +
+          (error instanceof Error ? error.message : String(error)) +
+          "\nCheck DNS, HTTPS_PROXY, firewall and TLS certificates.", "error");
+      }
     },
   });
 
