@@ -8,7 +8,7 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 - A native virtual model: `jev-manager/auto`, selectable from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
-- `/jev-test <task>` dry-run, `/jev-status`.
+- `/jev-test <task>` dry-run, `/jev-status`, and `/jev-health` for live model-health controls.
 - `/jev-scan` to discover models from a 9Router OpenAI-compatible API and import **selected** model IDs.
 - Native `/jev-models` menu contains **9Router settings** and **Scan 9Router models**.
 - Imported 9Router models become physical Pi models under `jev-9router/<original-model-id>` (e.g. `jev-9router/cc/claude-opus-...`), available immediately without overwriting an existing `9router` provider.
@@ -67,6 +67,21 @@ Choose **Search models** to filter by provider, model ID, or display name. The p
 In `/jev-config`, toggle **Subagent auto-routing: ON**. When main routing is ON in auto mode, the extension can fill an *unset* `model` argument in compatible spawning tools: `Agent` (pi-subagents-hub), `agent_spawn`, `spawn_agent`, and `subagent_spawn`. Explicit model assignments are never replaced. Known roles such as `planner`, `builder`, `reviewer`, `Plan`, and `Explore` map to task policies; other prompts are classified by Jev. The selected physical model stays fixed through the child run.
 
 **Limits:** Pi has no universal subagent spawn hook. The official example `subagent` tool has no model argument, so this addon does not change it. Compatibility depends on each third-party extension's model-override behavior. Children using `jev-9router/...` require the provider to be loaded in their own process (usually by installing this addon globally). A separate child may not inherit the parent runtime's in-memory credentials or extensions; test your subagent setup. Subagent routing defaults to **OFF**.
+
+## Runtime Model Health & Failover (v0.5)
+
+Pi's model catalog indicates configured/credentialed models, **not live provider availability**. Jev Model Manager now uses observed provider outcomes to avoid repeatedly selecting broken models.
+
+- **Passive monitoring (default ON):** watches real Pi assistant responses for recognizable outage/availability errors (HTTP 429, 5xx, connection failures, timeouts, invalid credentials or retired model IDs). It does not introduce network polling, token usage or a background service.
+- **Circuit breaker:** temporarily excludes a failing model from new-task routing, subagent auto-selection and dry-run recommendations. Default cooldown: **90 seconds**, exponentially increasing on repeated failures up to **15 minutes**. Models are eligible again after cooldown, and a successful response resets the failure counter.
+- **Retry recovery (default ON):** when Pi invokes the virtual router for a failed request with a recognizable provider error, it prefers the configured **healthy fallback**, then another healthy candidate. Attempted models are tracked per turn to prevent model ping-pong.
+- **Tool safety:** normal tool continuations remain pinned to their previous model. Context-window errors and user cancellations are not treated as service outages.
+- **Interactive controls:** use `/jev-health`, or `/jev-config` → **Model health & failover** to view observed status, toggle monitoring/failover, edit cooldowns, and clear quarantines.
+- **Active manual check:** `/jev-health` → **Test one model now** sends a short (maximum eight output tokens) live request to that model using Pi credentials, **only after confirmation**. It may incur provider usage. It does not include your current project files.
+
+**Example:** When an Antigravity model responds with an outage/HTTP 503, the addon records the failure and avoids that model during the cooldown. If Pi invokes its normal `retry` route and a healthy alternative exists, the retry switches to that model instead of blindly retrying Antigravity. Force/Prefer task targets that are cooling down become unavailable candidates and follow the existing fallback policy.
+
+**Limitations:** This is **observed, not guaranteed real-time availability**. Before a model has been called, its status is `unknown`; remote providers do not expose a universal free availability API. Automatic failover only happens at Pi's supported retry boundary, not after an arbitrary partially completed tool action. It cannot guarantee that the backup provider is healthy. Health history is in-memory and resets when Pi restarts or `/reload` runs. Independent Pi child processes have separate health caches unless a shared runner integration is added.
 
 ## How to use
 
@@ -294,7 +309,7 @@ Use `jev-model-manager.example.json` only if the model IDs are present in your P
 The chosen candidate must be listed by `ctx.modelRegistry.getAvailable()` and, when set, `ctx.scopedModels`. No other models can be selected.
 
 ## Known MVP limitations
-- Not runtime-tested with the end user's Pi installation. The TypeScript is intended for the **latest** Pi APIs; older versions may differ.
+- Not runtime-tested with the end user's Pi installation. The TypeScript is intended for the **latest** Pi APIs; older versions may differ. Live health probes and cross-provider retry behavior still require validation on actual Pi + 9Router + upstream services.
 - 9Router discovery tested with offline mocked OpenAI-compatible responses, **not** a live user router; integration with your real 9Router and Pi still needs validation.
 - Only `openai-completions` is registered for imported 9Router models. Non-chat IDs reported by `/v1/models` should not be imported until a matching transport is implemented. The scanner cannot validate tool use or reasoning support.
 - Built-in UI uses Pi select/input/editor dialogs; full-screen searchable TUI and graphs are planned, not implemented.
@@ -302,7 +317,7 @@ The chosen candidate must be listed by `ctx.modelRegistry.getAvailable()` and, w
 - Budget tiers are descriptive, not a billing enforcement mechanism.
 - Model changes happen at new user turns; follow-up tool responses and retries use the same model. This deliberately favors correctness and cache reuse over micro-routing every LLM request.
 - Classifier requests may incur provider charges. Prompt text is sent to TypeSafe. Never include secrets in test prompts; observe your data governance requirements.
-- A failed generation request is retried on the same model; implementing failover for provider outages is a later milestone.
+- Recognized provider outages now trigger a health cooldown and alternate routing **if Pi retries the failed request**. A mid-turn tool continuation still remains on its original model; this is not a universal replay/failover layer.
 - A low-confidence selection uses the configured fallback. Relative cost descriptions can influence Jev but aren't proof of live pricing or actual quality.
 - Do not run alongside another extension that auto-switches models unless you've designed precedence rules.
 

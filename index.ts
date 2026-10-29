@@ -6,8 +6,9 @@
  * TypeSafe classifier credentials: TYPESAFE_API_KEY.
  */
 import type { Message } from "@earendil-works/pi-ai";
-import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, type TaskRules } from "./task-routing.ts";
+import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules } from "./task-routing.ts";
 import { configureTaskRules } from "./task-ui.ts";
+import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
 import type {
@@ -67,6 +68,7 @@ interface Config {
   models: ManagedModel[];
   taskRules: TaskRules;
   subagentRouting: boolean;
+  health: HealthSettings;
 }
 interface Decision {
   model: string;
@@ -77,6 +79,7 @@ interface Decision {
 }
 interface RouteState {
   last: Decision;
+  attempted?: string[];
 }
 
 const defaults = (): Config => ({
@@ -90,6 +93,7 @@ const defaults = (): Config => ({
   models: [],
   taskRules: defaultTaskRules(),
   subagentRouting: false, // explicit opt-in: do not rewrite external spawn tools by default
+  health: { ...DEFAULT_HEALTH },
 });
 
 function readConfig(): Config {
@@ -105,6 +109,7 @@ function readConfig(): Config {
       models: Array.isArray(raw.models) ? raw.models.filter((m) => typeof m?.key === "string") : [],
       taskRules: normalizeTaskRules(raw.taskRules),
       subagentRouting: raw.subagentRouting === true,
+      health: normalizeHealthSettings(raw.health),
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);
@@ -406,8 +411,101 @@ async function configureRoutingOptions(ctx: ExtensionContext, config: Config): P
   }
 }
 
+
+
+async function probeModelHealth(ctx: ExtensionContext, config: Config, health: ModelHealth): Promise<void> {
+  const available = new Set(ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`));
+  const models = config.models.filter(m => m.enabled && available.has(m.key));
+  if (!models.length) {
+    ctx.ui.notify("No authenticated physical models available to probe.", "warning");
+    return;
+  }
+  const filter = await ctx.ui.input("Search model name, provider or ID (optional)", "");
+  if (filter == null) return;
+  const matches = filterModels(models, filter, 50);
+  if (!matches.length) {
+    ctx.ui.notify("No models match the search.", "warning");
+    return;
+  }
+  const selected = await ctx.ui.select("Run live model check · choose a model", matches.map(m => m.key));
+  if (!selected) return;
+  if (!await ctx.ui.confirm("Send a live 8-token test request?", "This incurs provider usage, tests only the chosen model, and may reveal its availability. No project files are sent.")) return;
+  const model = resolveModel(ctx, selected);
+  if (!model) return;
+  try {
+    const reply = await ctx.modelRegistry.complete(model, {
+      systemPrompt: "Availability check: reply with OK.",
+      messages: [{
+        role: "user" as const,
+        content: [{ type: "text" as const, text: "Reply OK." }],
+        timestamp: Date.now(),
+      }],
+    }, { maxTokens: 8, signal: AbortSignal.timeout(15000) });
+    if (reply.stopReason === "stop" || reply.stopReason === "toolUse") {
+      health.reportSuccess(selected);
+      ctx.ui.notify(`${selected} responded successfully. Health marked OK.`, "info");
+    } else {
+      const kind = health.reportFailure(selected, reply.stopReason, reply.errorMessage, config.health);
+      ctx.ui.notify(`${selected} failed live check${kind ? ` (${kind}; cooling down)` : " (not classified as an outage)"}.`, "warning");
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Unknown provider error";
+    const kind = health.reportFailure(selected, "error", reason, config.health);
+    // Avoid displaying raw provider errors: they may contain tokens or personal data.
+    ctx.ui.notify(`${selected}: live check failed${kind ? ` (${kind}; cooling down)` : " (unclassified)"}.`, "warning");
+  }
+}
+
+async function configureHealthOptions(ctx: ExtensionContext, config: Config, health: ModelHealth): Promise<void> {
+  while (true) {
+    const disabled = health.list(config.models.map(m => m.key))
+      .filter(s => s.status === "cooldown");
+    const choice = await ctx.ui.select("Jev · Model health & failover", [
+      `Health monitoring: ${config.health.enabled ? "ON" : "OFF"}`,
+      `Retry failover: ${config.health.autoFailover ? "ON" : "OFF"}`,
+      `Base cooldown: ${config.health.cooldownSeconds}s`,
+      `Max cooldown: ${config.health.maxCooldownSeconds}s`,
+      `Models cooling down: ${disabled.length}`,
+      "View model health",
+      "Test one model now (uses a few tokens)",
+      "Clear all cooldowns",
+      "Back",
+    ]);
+    if (!choice || choice === "Back") return;
+    if (choice.startsWith("Health monitoring:")) config.health.enabled = !config.health.enabled;
+    else if (choice.startsWith("Retry failover:")) config.health.autoFailover = !config.health.autoFailover;
+    else if (choice.startsWith("Base cooldown:") || choice.startsWith("Max cooldown:")) {
+      const isBase = choice.startsWith("Base");
+      const field = isBase ? "cooldownSeconds" : "maxCooldownSeconds";
+      const raw = await ctx.ui.input("Cooldown in seconds (5–86400)", String(config.health[field]));
+      if (raw == null) continue;
+      const n = Number(raw);
+      if (Number.isSafeInteger(n) && n >= 5 && n <= 86400) {
+        config.health[field] = n;
+        if (config.health.maxCooldownSeconds < config.health.cooldownSeconds) {
+          config.health.maxCooldownSeconds = config.health.cooldownSeconds;
+        }
+      } else ctx.ui.notify("Enter an integer between 5 and 86400 seconds.", "warning");
+    } else if (choice === "View model health" || choice.startsWith("Models cooling down:")) {
+      const statuses = health.list(config.models.map(m => m.key));
+      const rows = statuses.slice(0, 70).map(s =>
+        `${s.key}: ${s.status}${s.remainingSeconds ? ` (${s.remainingSeconds}s)` : ""}${s.reason ? ` [${s.reason}]` : ""}`
+      );
+      await ctx.ui.select("Observed model health · last Pi requests", [...rows, "Back"]);
+    } else if (choice === "Test one model now (uses a few tokens)") {
+      await probeModelHealth(ctx, config, health);
+    } else if (choice === "Clear all cooldowns") {
+      if (await ctx.ui.confirm("Clear observed health?", "This removes local error history; it does not fix an unavailable provider.")) {
+        health.reset();
+        ctx.ui.notify("Health cache cleared. Models will be eligible on their next request.", "info");
+      }
+    }
+    saveConfig(config);
+  }
+}
+
 /** Central, extensible configuration screen, accessible via /jev-config and /jev-models. */
-async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: ModelHealth): Promise<void> {
   if (!ctx.hasUI) return;
   const config = readConfig();
   while (true) {
@@ -421,6 +519,7 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
       `Jev key: ${statusJev}`,
       "Routing & classifier options",
       "Task routing (/jev-tasks)",
+      "Model health & failover (/jev-health)",
       `Subagent auto-routing: ${config.subagentRouting ? "ON" : "OFF"}`,
       "Test 9Router connection",
       "Manage models (/jev-models)",
@@ -462,6 +561,8 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
         await configureStoredKey(pi, ctx, config, "jev");
       } else if (choice === "Task routing (/jev-tasks)") {
         await configureTaskRules(ctx, config.taskRules, config.models.filter(m => m.enabled), () => saveConfig(config));
+      } else if (choice === "Model health & failover (/jev-health)") {
+        await configureHealthOptions(ctx, config, health);
       } else if (choice.startsWith("Subagent auto-routing:")) {
         config.subagentRouting = !config.subagentRouting;
         saveConfig(config);
@@ -612,6 +713,23 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
 
 export default function (pi: ExtensionAPI) {
   let lastDecision: Decision | undefined;
+  const health = new ModelHealth();
+
+  // Track real provider outcomes instead of trusting the static Pi catalog.
+  // Observation must not mutate session messages or tool results.
+  pi.on?.("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    const config = readConfig();
+    if (!config.health.enabled) return;
+    const key = `${message.provider}/${message.model}`;
+    if (!config.models.some(m => m.key === key)) return;
+    if (message.stopReason === "error") {
+      health.reportFailure(key, message.stopReason, message.errorMessage, config.health);
+    } else if (message.stopReason === "stop" || message.stopReason === "toolUse") {
+      health.reportSuccess(key);
+    }
+  });
   // Saved imports are available immediately on startup, even when the proxy is offline.
   // Discovery itself is intentionally manual and never sends task prompts to 9Router.
   syncNineRouterProvider(pi, readConfig());
@@ -624,21 +742,55 @@ export default function (pi: ExtensionAPI) {
     thinkingLevels: ["off", "low", "medium", "high", "xhigh"],
     async route(request: ModelRouteRequest<RouteState>, ctx) {
       const config = readConfig();
-      const candidates = physicalCandidates(config, ctx);
-      if (!candidates.length) {
+      const allCandidates = physicalCandidates(config, ctx);
+      if (!allCandidates.length) {
         throw new Error("Jev Manager: no eligible authenticated physical models. Run /jev-models.");
       }
-      const base = fallbackModel(candidates, config);
-      // Preserve tool follow-ups and retries; otherwise cache and tool signatures can break.
-      if (request.reason === "continuation" || request.reason === "retry") {
-        const sticky = request.failed ?? request.previous;
-        if (sticky && candidates.some((m) => m.key === keyOf(sticky.model))) {
-          return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
+      const candidates = allCandidates.filter(m => health.isEligible(m.key, config.health));
+      const sticky = request.failed ?? request.previous;
+
+      if (request.reason === "continuation" && sticky && allCandidates.some(m => m.key === keyOf(sticky.model))) {
+        // Do not switch in the middle of a successful turn; tool/thinking state may be model-specific.
+        return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
+      }
+      if (request.reason === "retry" && request.failed) {
+        const failedKey = keyOf(request.failed.model);
+        const problem = health.reportFailure(
+          failedKey, request.failed.message.stopReason, request.failed.message.errorMessage, config.health,
+        );
+        if (problem && config.enabled && config.mode === "auto" && config.health.autoFailover) {
+          const attempted = new Set([...(request.state?.attempted ?? []), failedKey]);
+          const available = candidates.filter(m => !attempted.has(m.key));
+          const next = available.find(m => m.key === config.fallback) ?? available[0];
+          if (next) {
+            const decision: Decision = {
+              model: next.key, task: request.state?.last.task ?? "unknown",
+              probability: 0, reason: `health failover (${problem}) from ${failedKey}`,
+            };
+            lastDecision = decision;
+            if (ctx.hasUI) ctx.ui.setStatus("jev-manager", `Jev recovery → ${next.label}`);
+            return {
+              model: resolveModel(ctx, next.key)!,
+              thinkingLevel: next.thinking,
+              state: { last: decision, attempted: [...attempted, next.key] },
+            };
+          }
+          if (ctx.hasUI) ctx.ui.notify("No healthy alternate model available for retry. Pi may retry the same model.", "warning");
         }
       }
-      if (request.reason === "direct") {
-        return { model: resolveModel(ctx, base.key)!, thinkingLevel: base.thinking };
+      // Pi may retry non-provider failures (e.g. compaction) without rerouting.
+      if (request.reason === "retry" && sticky && allCandidates.some(m => m.key === keyOf(sticky.model))) {
+        return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
       }
+      if (request.reason === "direct") {
+        const model = candidates.find(m => m.key === config.fallback) ?? candidates[0]
+          ?? fallbackModel(allCandidates, config);
+        return { model: resolveModel(ctx, model.key)!, thinkingLevel: model.thinking };
+      }
+      if (!candidates.length) {
+        throw new Error("Jev Manager: all configured models are cooling down after provider errors. Run /jev-health to inspect or reset.");
+      }
+      const base = fallbackModel(candidates, config);
       const prompt = lastUserText(request.messages);
       const decision = prompt
         ? await choose(prompt, config, candidates, ctx, request.signal)
@@ -650,7 +802,7 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) {
         ctx.ui.setStatus("jev-manager", `Jev ${config.mode}: ${selected.label} · ${decision.task}`);
       }
-      return { model: physical, thinkingLevel: selected.thinking, state: { last: decision } };
+      return { model: physical, thinkingLevel: selected.thinking, state: { last: decision, attempted: [selected.key] } };
     },
   });
 
@@ -668,7 +820,8 @@ export default function (pi: ExtensionAPI) {
     const task = typeof input.task === "string" ? input.task :
       typeof input.prompt === "string" ? input.prompt : "";
     if (!task.trim()) return;
-    const candidates = physicalCandidates(settings, ctx);
+    const candidates = physicalCandidates(settings, ctx)
+      .filter(m => health.isEligible(m.key, settings.health));
     if (!candidates.length) return;
     const role = subagentTaskType(input);
     // Explicit agent roles apply to task policies; otherwise classify the task.
@@ -697,6 +850,7 @@ export default function (pi: ExtensionAPI) {
           "Add a model from Pi catalog",
           "Configure addon (/jev-config)",
           "Task routing (/jev-tasks)",
+          "Model health & failover (/jev-health)",
           `9Router settings: ${resolveNineRouterBaseUrl(config.nineRouter)}${process.env[NINE_ROUTER_BASE_URL_ENV]?.trim() ? " [env]" : ""}`,
           "Scan 9Router models",
           ...names, "Done",
@@ -715,10 +869,12 @@ export default function (pi: ExtensionAPI) {
             else ctx.ui.notify("Enter a number between 0 and 1", "warning");
           }
         } else if (choice === "Configure addon (/jev-config)") {
-          await configureAddon(pi, ctx);
+          await configureAddon(pi, ctx, health);
           config = readConfig();
         } else if (choice === "Task routing (/jev-tasks)") {
           await configureTaskRules(ctx, config.taskRules, config.models.filter(m => m.enabled), () => saveConfig(config));
+        } else if (choice === "Model health & failover (/jev-health)") {
+          await configureHealthOptions(ctx, config, health);
         } else if (choice.startsWith("9Router settings:")) {
           if (await configureNineRouterSettings(ctx, config)) syncNineRouterProvider(pi, config);
         } else if (choice === "Scan 9Router models") {
@@ -774,6 +930,15 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("jev-health", {
+    description: "Inspect observed model outages, cooldowns and recovery options",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      const config = readConfig();
+      await configureHealthOptions(ctx, config, health);
+    },
+  });
+
   pi.registerCommand("jev-status", {
     description: "Show routing status and latest Jev selection",
     handler: async (_args, ctx) => {
@@ -781,7 +946,7 @@ export default function (pi: ExtensionAPI) {
       const d = lastDecision;
       ctx.ui.notify(
         `Jev ${config.enabled ? "enabled" : "disabled"} (${config.mode}), ` +
-        `${config.models.length} models, fallback=${config.fallback || "unset"}` +
+        `${config.models.length} models, cooldown=${health.list(config.models.map(m => m.key)).filter(s => s.status === "cooldown").length}, fallback=${config.fallback || "unset"}` +
         (d ? `\nLast: ${d.task} → ${d.model}, p=${d.probability.toFixed(2)} (${d.reason})` : ""),
         "info",
       );
@@ -792,8 +957,8 @@ export default function (pi: ExtensionAPI) {
     description: "Dry-run a prompt through Jev, without changing the active model",
     handler: async (args, ctx) => {
       const config = readConfig();
-      const candidates = physicalCandidates(config, ctx);
-      if (!candidates.length) return ctx.ui.notify("No eligible models. Run /jev-models.", "warning");
+      const candidates = physicalCandidates(config, ctx).filter(m => health.isEligible(m.key, config.health));
+      if (!candidates.length) return ctx.ui.notify("No healthy eligible models. Run /jev-health or /jev-models.", "warning");
       const prompt = args.trim() || (ctx.hasUI ? await ctx.ui.input("Test task") : "") || "";
       if (!prompt) return;
       const d = await choose(prompt, { ...config, enabled: true }, candidates, ctx);
