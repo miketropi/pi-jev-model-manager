@@ -1,5 +1,7 @@
 # Pi Jev Model Manager — MVP
 
+![Jev Model Manager — intelligent routing for Pi](assets/jev-model-manager-thumbnail.webp)
+
 A reference Pi extension for automatic model choice via TypeSafe Jev with a native management UI.
 
 ## Features
