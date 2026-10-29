@@ -394,6 +394,43 @@ Pipeline decisions and results are stored in the **current Pi session**, so stat
 
 **Limitations:** A tool-reported `pass` is an agent-provided declaration with a note, not independent proof of correctness. Verify important changes personally. The option and phase transitions are integration-tested with a mocked Pi extension runtime; live Pi TUI behavior depends on the installed Pi build. This version remains within the same Pi session rather than creating isolated sessions.
 
+## Linked Implementation Sessions (v0.9.1)
+
+Each approved plan can now start its own **clean, linked Pi Implementation Session**. Unlike a fork, Pi's `newSession()` does not copy brainstorming history. The new session receives only the approved Markdown plan, original user request, version, implementation checklist, and a link to the Planning Session file. The model selection is set to Jev's virtual `jev-manager/auto` so the existing per-phase routing can continue.
+
+### Plan approval menu
+
+The first two choices are **recommended**:
+
+- **Implement now · New session (recommended)** — New linked Implementation Session; QA/Review remain manual.
+- **Auto Implement → QA → Review · New session** — New linked Implementation Session; QA and Review run in the same child after verified Implementation completion.
+- **Implement now (approve plan)** — Keep the existing same-session manual workflow.
+- **Auto Implement → QA → Review (approve plan)** — Keep the existing same-session automatic workflow.
+- **View/edit**, **Refine**, **Keep**, and **Cancel** remain available.
+
+### Important Pi API constraint
+
+Pi's `ctx.newSession()` is only available to slash-command handlers, **not** to `agent_settled` event handlers. Jev does not circumvent this restriction:
+
+- When the plan menu is opened from `/jev-plan-open` (command context), choosing a New Session option creates and opens the child immediately.
+- When the plan menu appears automatically as the planning agent settles, choosing a New Session option **prepares `/jev-implement-session manual` or `/jev-implement-session auto` in the Pi editor**; press **Enter once** to safely complete the transition.
+
+This one extra Enter is required by Pi's command-only session replacement API, not an extra model approval step. The selected plan is already saved. The child session is named `Jev Implement · <plan title>` and includes a `parentSession` header reference. Open existing child sessions via Pi's native `/resume` rather than creating duplicate sessions. If a previous launch attempt is recorded for a plan, Jev prompts for explicit confirmation before starting another.
+
+### Commands and lifecycle
+
+```text
+/jev-implement-session manual  # Launch approved plan in a clean child session
+/jev-implement-session auto    # Launch with auto Implement -> QA -> Review
+/jev-session-origin            # Show linked Planning Session path/version
+/jev-pipeline-status           # In child: inspect Auto QA/Review progress
+/jev-pipeline-resume           # Resume a paused Auto phase after /reload
+```
+
+After a child session starts, its own session JSONL stores the approved plan and checklist. **QA and Review stay inside that child session**. Reloading or resuming pauses any running automatic pipeline until explicit `/jev-pipeline-resume`. The parent Planning Session is retained independently.
+
+**Scope:** Session isolation separates *conversation context*, not working-tree files. Both sessions still work in the same project directory; this does not create a Git worktree or branch. A child session can be revisited via Pi's native `/resume`. The feature uses the documented Pi session API and has mocked end-to-end tests, but has not yet been executed on your local Pi build.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.

@@ -16,6 +16,8 @@ import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle,
 import { RobotMotion } from "./robot-motion.ts";
 import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestProgress, progressLines, type Progress } from "./progress.ts";
 import { savePlanMirror, cleanPlanMirror, pruneOldPlanMirrors } from "./plan-cache.ts";
+import { SESSION_ORIGIN_ENTRY, SESSION_LAUNCH_ENTRY, createOrigin,
+  latestSessionOrigin, latestSessionLaunch, handoffTitle, type HandoffMode } from "./implementation-session.ts";
 import { PIPELINE_ENTRY, startPipeline, advancePipeline, latestPipelineFromBranch,
   pipelineLines, reportGate, nextPhasePrompt, type PipelineState } from "./auto-pipeline.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
@@ -852,6 +854,7 @@ export default function (pi: ExtensionAPI) {
   let implementationProgress: Progress | undefined;
   let trackedSessionId: string | undefined;
   let progressToolInjected = false;
+  let implementationOrigin: ReturnType<typeof latestSessionOrigin>;
   let autoPipeline: PipelineState | undefined;
   let pipelineGateInjected = false;
 
@@ -922,6 +925,66 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function createImplementationSession(ctx: any, mode: HandoffMode): Promise<void> {
+    if (!planDocument || planDocument.status !== "approved") {
+      ctx.ui.notify("Approve a Jev plan before creating an Implementation Session.", "warning");
+      return;
+    }
+    if (typeof ctx.newSession !== "function") {
+      ctx.ui.notify("New sessions require Pi command context; run /jev-implement-session "+mode+".", "warning");
+      return;
+    }
+    const parentPath=ctx.sessionManager?.getSessionFile?.();
+    if (!parentPath) {
+      ctx.ui.notify("A persistent Planning Session is needed to link Implementation. Save the session first.", "warning");
+      return;
+    }
+    const last=latestSessionLaunch(ctx.sessionManager?.getBranch?.()??[],planDocument.version);
+    if (last && last.status === "requested") {
+      const confirm=await ctx.ui.confirm?.("Already launched?",
+        "An Implementation Session may already exist for plan v"+planDocument.version+
+        ". Check Pi /resume first. Create another session?");
+      if (confirm!==true)return;
+    }
+    // Capture only immutable data; callbacks run after the old extension is destroyed.
+    const snapshot=JSON.parse(JSON.stringify(planDocument)) as PlanDocument;
+    const plan=implementationHandoff(snapshot);
+    const origin=createOrigin(parentPath,snapshot,mode);
+    const title=handoffTitle(snapshot);
+    pi.appendEntry(SESSION_LAUNCH_ENTRY,{
+      planVersion:snapshot.version,mode,status:"requested",createdAt:origin.createdAt,
+    });
+    try {
+      const result=await ctx.newSession({
+        parentSession:parentPath,
+        setup:async (sm:any)=>{
+          sm.appendCustomEntry(PLAN_ENTRY,snapshot);
+          sm.appendCustomEntry(SESSION_ORIGIN_ENTRY,origin);
+          sm.appendCustomEntry(WORKFLOW_ENTRY,{task:"implement"});
+          sm.appendCustomEntry(PROGRESS_ENTRY,newProgress(snapshot.markdown,snapshot.version));
+          if(mode==="auto")sm.appendCustomEntry(PIPELINE_ENTRY,startPipeline(snapshot.version));
+          sm.appendModelChange("jev-manager","auto");
+          sm.appendSessionInfo(title);
+        },
+        withSession:async (fresh:any)=>{
+          // Never touch the stale command ctx / pi instance here.
+          await fresh.sendUserMessage(plan);
+        },
+      });
+      if(result?.cancelled){
+        // Only on cancellation is the original command context still valid.
+        pi.appendEntry(SESSION_LAUNCH_ENTRY,{
+          planVersion:snapshot.version,mode,status:"cancelled",createdAt:origin.createdAt,
+        });
+        ctx.ui.notify("New-session handoff cancelled; the approved plan is preserved.", "info");
+      }
+    }catch(error){
+      // Lifecycle may already have switched; do not access captured Pi APIs here.
+      throw new Error("Could not launch Jev Implementation Session: "+
+        (error instanceof Error?error.message:String(error)));
+    }
+  }
+
   async function openPlan(ctx: ExtensionContext): Promise<void> {
     if (!planDocument) {
       ctx.ui.notify("No saved Jev plan yet. Run /jev-plan first.", "warning");
@@ -934,7 +997,10 @@ export default function (pi: ExtensionAPI) {
     for (let step = 0; step < 12; step++) {
       const choice = await ctx.ui.select(
         `Jev Plan v${planDocument.version} · ${planDocument.status} · next action`,
-        ["View / edit full plan", "Implement now (approve plan)",
+        ["View / edit full plan",
+         "Implement now · New session (recommended)",
+         "Auto Implement → QA → Review · New session",
+         "Implement now (approve plan)",
          "Auto Implement → QA → Review (approve plan)",
          "Refine with AI", "Keep plan for later", "Cancel"],
       );
@@ -958,6 +1024,20 @@ export default function (pi: ExtensionAPI) {
           if (workflowTask === "plan")
             pi.sendUserMessage("Revise the existing Jev plan based on this feedback. Do not implement.\nCurrent plan:\n"+
               planDocument.markdown+"\nFeedback:\n"+change.trim(), {deliverAs:"followUp"});
+        }
+        return;
+      } else if (choice === "Implement now · New session (recommended)"
+        || choice === "Auto Implement → QA → Review · New session") {
+        const mode: HandoffMode=choice.startsWith("Auto")?"auto":"manual";
+        const approved={...planDocument,status:"approved" as const};
+        savePlan(approved,ctx);
+        if (typeof (ctx as any).newSession === "function") {
+          await createImplementationSession(ctx as any,mode);
+        } else {
+          const cmd="/jev-implement-session "+mode;
+          if (ctx.hasUI && ctx.ui.setEditorText) ctx.ui.setEditorText(cmd);
+          ctx.ui.notify("Plan approved. Pi requires a slash command to switch sessions. Press Enter on "+cmd+
+            " to create the linked implementation session.", "info");
         }
         return;
       } else if (choice === "Implement now (approve plan)"
@@ -1115,7 +1195,7 @@ export default function (pi: ExtensionAPI) {
 
   const health = new ModelHealth();
 
-  pi.on?.("session_start", (_event, ctx) => {
+  pi.on?.("session_start", (event, ctx) => {
     robotView = undefined;
     robotAnimator?.stop();
     implementationHandoffPending = false;
@@ -1127,9 +1207,12 @@ export default function (pi: ExtensionAPI) {
     progressToolInjected = false;
     planDocument = latestPlanFromBranch(branch);
     implementationProgress = latestProgress(branch);
+    implementationOrigin = latestSessionOrigin(branch);
     autoPipeline = latestPipelineFromBranch(branch);
-    // A process reload/resume must never silently launch the next phase.
-    if (autoPipeline?.status === "running") {
+    // The just-created child must start its approved pipeline. A later reload
+    // or resume is paused until the user explicitly resumes.
+    const initialHandoff = event?.reason === "new" && !!implementationOrigin;
+    if (autoPipeline?.status === "running" && !initialHandoff) {
       autoPipeline = {...autoPipeline,status:"paused",reason:"Session resumed; use /jev-pipeline-resume"};
       pi.appendEntry(PIPELINE_ENTRY,autoPipeline);
     }
@@ -1154,6 +1237,13 @@ export default function (pi: ExtensionAPI) {
           ? saved.toolsBeforeStrictPhase.filter((x: unknown) => typeof x === "string")
           : pi.getActiveTools();
         pi.setActiveTools(toolsForPhase(pi.getActiveTools(), workflowTask!));
+      }
+    }
+    if(workflowTask==="implement" && typeof pi.getAllTools==="function"){
+      const active=pi.getActiveTools();
+      if(pi.getAllTools().some(t=>t.name==="jev_progress") && !active.includes("jev_progress")){
+        pi.setActiveTools([...active,"jev_progress"]);
+        progressToolInjected=true;
       }
     }
     const config = readConfig();
@@ -1693,6 +1783,25 @@ export default function (pi: ExtensionAPI) {
         : nextPhasePrompt(p.phase as "qa"|"review",planDocument?.markdown??"",
             planDocument?.request);
       pi.sendUserMessage(message,{deliverAs:"followUp"});
+    },
+  });
+
+  pi.registerCommand("jev-implement-session", {
+    description:"Create a clean linked Pi Implementation Session from approved plan, with optional automatic QA/Review",
+    handler:async (args,ctx)=>{
+      const mode:HandoffMode=args.trim()==="auto"?"auto":"manual";
+      await ctx.waitForIdle?.();
+      await createImplementationSession(ctx,mode);
+    },
+  });
+  pi.registerCommand("jev-session-origin", {
+    description:"Show the Planning Session linked to the current Implementation Session",
+    handler:async (_args,ctx)=>{
+      const origin=implementationOrigin;
+      ctx.ui.notify(origin
+        ? "Jev Implementation · plan v"+origin.planVersion+" · "+origin.mode+
+          "\nPlanning Session: "+origin.parentSession
+        : "This session is not linked to a Jev Planning Session.", "info");
     },
   });
 
