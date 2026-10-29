@@ -16,6 +16,8 @@ import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle,
 import { RobotMotion } from "./robot-motion.ts";
 import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestProgress, progressLines, type Progress } from "./progress.ts";
 import { savePlanMirror, cleanPlanMirror, pruneOldPlanMirrors } from "./plan-cache.ts";
+import { PIPELINE_ENTRY, startPipeline, advancePipeline, latestPipelineFromBranch,
+  pipelineLines, reportGate, nextPhasePrompt, type PipelineState } from "./auto-pipeline.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
@@ -850,6 +852,22 @@ export default function (pi: ExtensionAPI) {
   let implementationProgress: Progress | undefined;
   let trackedSessionId: string | undefined;
   let progressToolInjected = false;
+  let autoPipeline: PipelineState | undefined;
+  let pipelineGateInjected = false;
+
+  function savePipeline(p: PipelineState, ctx: ExtensionContext): void {
+    autoPipeline = p;
+    pi.appendEntry(PIPELINE_ENTRY, p);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("jev-pipeline", ["cancelled","completed"].includes(p.status) ? undefined
+        : "AUTO " + p.phase.toUpperCase() + " · " + p.status.toUpperCase());
+    }
+  }
+  function cancelPipeline(ctx: ExtensionContext, reason = "Stopped by user"): void {
+    if (!autoPipeline || ["cancelled","completed"].includes(autoPipeline.status)) return;
+    savePipeline({...autoPipeline,status:"cancelled",reason},ctx);
+  }
+
 
   function showProgress(ctx: ExtensionContext): void {
     if (ctx.mode !== "tui") return;
@@ -917,6 +935,7 @@ export default function (pi: ExtensionAPI) {
       const choice = await ctx.ui.select(
         `Jev Plan v${planDocument.version} · ${planDocument.status} · next action`,
         ["View / edit full plan", "Implement now (approve plan)",
+         "Auto Implement → QA → Review (approve plan)",
          "Refine with AI", "Keep plan for later", "Cancel"],
       );
       if (!choice || choice === "Keep plan for later" || choice === "Cancel") {
@@ -941,12 +960,17 @@ export default function (pi: ExtensionAPI) {
               planDocument.markdown+"\nFeedback:\n"+change.trim(), {deliverAs:"followUp"});
         }
         return;
-      } else if (choice === "Implement now (approve plan)") {
+      } else if (choice === "Implement now (approve plan)"
+        || choice === "Auto Implement → QA → Review (approve plan)") {
+        const automatic = choice.startsWith("Auto Implement");
         const approved = { ...planDocument, status: "approved" as const };
-        // Make Phase IMPLEMENT authoritative BEFORE queuing the new user turn.
         savePlan(approved, ctx);
-        await runWorkflowCommand("implement", "", ctx);
+        if (automatic) savePipeline(startPipeline(approved.version),ctx);
+        else cancelPipeline(ctx,"User selected manual Implement now");
+        await runWorkflowCommand("implement", "", ctx, false, automatic);
         if (workflowTask !== "implement") {
+          if (automatic) savePipeline({...autoPipeline!,status:"paused",
+            reason:"Could not activate Implementation"},ctx);
           ctx.ui.notify("Could not switch to Implementation; approved plan remains saved.", "error");
           return;
         }
@@ -959,6 +983,10 @@ export default function (pi: ExtensionAPI) {
 
 
   function changeWorkflow(task: TaskType | undefined): void {
+    if (pipelineGateInjected && task !== workflowTask) {
+      pi.setActiveTools(pi.getActiveTools().filter(n=>n!=="jev_quality_gate"));
+      pipelineGateInjected = false;
+    }
     if (workflowTask === "implement" && task !== "implement" && progressToolInjected) {
       pi.setActiveTools(pi.getActiveTools().filter(name=>name!=="jev_progress"));
       progressToolInjected = false;
@@ -970,8 +998,10 @@ export default function (pi: ExtensionAPI) {
       toolsBeforeStrictPhase = pi.getActiveTools();
       const registered = typeof pi.getAllTools === "function"
         ? new Set(pi.getAllTools().map(tool => tool.name)) : new Set<string>();
-      const additions = ["jev_web_fetch", "jev_ask_user"]
+      const additions = ["jev_web_fetch", "jev_ask_user",
+        ...(task === "review" && autoPipeline?.phase === "review" ? ["jev_quality_gate"] : [])]
         .filter(name => registered.has(name) && !toolsBeforeStrictPhase!.includes(name));
+      if (additions.includes("jev_quality_gate")) pipelineGateInjected = true;
       pi.setActiveTools(toolsForPhase([...toolsBeforeStrictPhase, ...additions], task!));
     } else if (wasStrict && !nextStrict && toolsBeforeStrictPhase) {
       pi.setActiveTools(toolsBeforeStrictPhase);
@@ -980,11 +1010,12 @@ export default function (pi: ExtensionAPI) {
     workflowTask = task;
   }
 
-  async function runWorkflowCommand(task: TaskType, args: string, ctx: ExtensionContext): Promise<void> {
-    // Do not lift a previous read-only guard while its turn is still executing.
-    await ctx.waitForIdle?.();
-    // No task state change when Jev cannot be activated.
+  async function runWorkflowCommand(task: TaskType, args: string, ctx: ExtensionContext,
+    skipIdle = false, fromPipeline = false): Promise<void> {
+    // This is only skipped at the final agent-settled boundary, never mid-turn.
+    if (!skipIdle) await ctx.waitForIdle?.();
     if (!await activateJev(pi, ctx)) return;
+    if (!fromPipeline) cancelPipeline(ctx,"Switched task phase manually");
     changeWorkflow(task);
     if (task === "implement" && planDocument?.status === "approved") {
       if (!implementationProgress || implementationProgress.version !== planDocument.version
@@ -997,6 +1028,13 @@ export default function (pi: ExtensionAPI) {
     if (task === "plan" && args.trim()) planOriginalRequest = args.trim();
     if (task !== "implement") implementationHandoffPending = false;
     if (task !== "plan") showPlanSummary(ctx, false);
+    if (fromPipeline && task === "qa" && typeof pi.getAllTools === "function") {
+      const enabled = pi.getAllTools().some(t=>t.name==="jev_quality_gate");
+      if (enabled && !pi.getActiveTools().includes("jev_quality_gate")) {
+        pi.setActiveTools([...pi.getActiveTools(),"jev_quality_gate"]);
+        pipelineGateInjected = true;
+      }
+    }
     if (task === "implement" && typeof pi.getAllTools === "function") {
       const registered = pi.getAllTools().some(t=>t.name==="jev_progress");
       if (registered && !pi.getActiveTools().includes("jev_progress")) {
@@ -1047,6 +1085,34 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name:"jev_quality_gate",label:"Jev · QA/Review verdict",
+    description:"Record the outcome of an automatic QA or Review phase. Required for automatic advancement; provide factual evidence of checks performed. A fail outcome stops the pipeline.",
+    defaultActive:false,
+    promptSnippet:"Record verified QA/Review pass or fail for the active Jev pipeline.",
+    promptGuidelines:["When running an automatic Jev QA or Review phase, call jev_quality_gate exactly once with actual evidence, pass/fail and findings. Never claim pass without verification."],
+    parameters:{type:"object",required:["outcome","evidence"],additionalProperties:false,
+      properties:{
+        outcome:{type:"string",enum:["pass","fail"]},
+        evidence:{type:"string",minLength:12,maxLength:1000},
+        findings:{type:"array",items:{type:"string"},maxItems:16},
+      }} as any,
+    async execute(_id,params,_signal,_onUpdate,ctx){
+      if(!autoPipeline || autoPipeline.status!=="running"
+        || !["qa","review"].includes(autoPipeline.phase)
+        || workflowTask !== autoPipeline.phase)
+        return {isError:true,content:[{type:"text",
+          text:"No active automatic QA/Review phase. Manual phases are not auto-gated."}]};
+      try{
+        const stage=workflowTask as "qa"|"review";
+        const gate=reportGate(stage,params.outcome,params.evidence,params.findings??[]);
+        savePipeline({...autoPipeline,[stage]:gate},ctx);
+        return {content:[{type:"text",text:stage.toUpperCase()+" verdict recorded: "+
+          gate.outcome+". Evidence: "+gate.evidence}],details:gate};
+      }catch(e){return {isError:true,content:[{type:"text",text:String(e)}]};}
+    },
+  });
+
   const health = new ModelHealth();
 
   pi.on?.("session_start", (_event, ctx) => {
@@ -1061,6 +1127,15 @@ export default function (pi: ExtensionAPI) {
     progressToolInjected = false;
     planDocument = latestPlanFromBranch(branch);
     implementationProgress = latestProgress(branch);
+    autoPipeline = latestPipelineFromBranch(branch);
+    // A process reload/resume must never silently launch the next phase.
+    if (autoPipeline?.status === "running") {
+      autoPipeline = {...autoPipeline,status:"paused",reason:"Session resumed; use /jev-pipeline-resume"};
+      pi.appendEntry(PIPELINE_ENTRY,autoPipeline);
+    }
+    if(ctx.hasUI)ctx.ui.setStatus("jev-pipeline",
+      autoPipeline && !["cancelled","completed"].includes(autoPipeline.status)
+        ? "AUTO "+autoPipeline.phase.toUpperCase()+" · "+autoPipeline.status.toUpperCase() : undefined);
     planOriginalRequest = planDocument?.request;
     const savedUi = [...branch].reverse().find((e: any) =>
       e?.type === "custom" && e.customType === PLAN_UI_ENTRY);
@@ -1147,6 +1222,33 @@ export default function (pi: ExtensionAPI) {
       cleanPlanMirror(trackedSessionId);
       showProgress(ctx);
     }
+    const pipeline = autoPipeline;
+    if (pipeline?.status === "running" && pipeline.phase === workflowTask) {
+      const updated=advancePipeline(pipeline,{
+        implementationCompleted:implementationProgress?.stage==="complete",
+        result:pipeline.phase==="qa" ? pipeline.qa : pipeline.phase==="review" ? pipeline.review : undefined,
+        aborted:event?.aborted === true,
+      });
+      if(updated!==pipeline){
+        savePipeline(updated,ctx);
+        if(updated.status==="completed"){
+          ctx.ui.notify("Jev Auto pipeline complete · Implementation, QA and Review verified.", "info");
+        }else if(updated.status==="failed" || updated.status==="paused"){
+          ctx.ui.notify("Jev Auto stopped at "+pipeline.phase.toUpperCase()+": "+
+            (updated.reason ?? "verification incomplete")+
+            ". Inspect /jev-pipeline-status or continue manually.", "warning");
+        }else if(updated.phase!==pipeline.phase && ["qa","review"].includes(updated.phase)){
+          const next=updated.phase as "qa"|"review";
+          await runWorkflowCommand(next,"",ctx,true,true);
+          if(workflowTask !== next){
+            savePipeline({...updated,status:"paused",reason:"Could not activate "+next},ctx);
+          }else{
+            pi.sendUserMessage(nextPhasePrompt(next,planDocument?.markdown??"",
+              planDocument?.request),{deliverAs:"followUp"});
+          }
+        }
+      }
+    }
     if (!planRunActive) return;
     planRunActive = false;
     const text = pendingPlanText;
@@ -1190,6 +1292,9 @@ export default function (pi: ExtensionAPI) {
       skillGuidance(workflowTask, skills);
     if (workflowTask === "plan") {
       instructions += "\n\nPLAN DOCUMENT STORAGE: Do not create any plan.md, plan-*.md or planning scratch files in the project working directory. Return the final Markdown as your answer; Jev saves it inside the Pi session and mirrors it outside the project. Include actionable numbered steps or Markdown checkboxes for implementation progress.\n\nPLAN DOCUMENT REQUIREMENT: On finishing the research, output a complete self-contained Markdown implementation plan. Include Goal, Evidence & assumptions, Decisions & tradeoffs, Numbered steps, Files to touch, Validation, Risks and Acceptance criteria. Do not implement it. Jev will save the final answer and ask the user whether to review, refine, keep or implement.";
+    } else if (["qa","review"].includes(workflowTask)
+      && autoPipeline?.status === "running" && autoPipeline.phase === workflowTask) {
+      instructions += "\n\nJEV AUTO QUALITY GATE: This phase must finish by calling jev_quality_gate with outcome pass or fail, meaningful evidence and findings. Do not claim pass without running/inspecting appropriate verification. Report fail if unable to verify. No automatic repair loops. QA may run tests; Review is strictly read-only.";
     } else if (workflowTask === "implement" && planDocument?.status === "approved") {
       instructions += "\n\nIMPLEMENTATION PROGRESS: The active checklist belongs to this Pi session. Call jev_progress(action=list) to see step IDs; call jev_progress(action=update,stepId=N,status=active) before working on a step, status=done only after verifying that step with a short factual note, or status=blocked with the reason. Never mark steps done automatically or without evidence. The TUI updates from these calls; do not merely report progress in prose. Do not write auxiliary plan Markdown files inside the working repository; the approved plan is managed outside the project. Only write actual user-requested deliverables.\n";
       instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Do not produce another plan, planning document, review or outline instead of performing the final work.";
@@ -1555,6 +1660,42 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("jev-pipeline-status", {
+    description:"Inspect the current opt-in Auto Implement → QA → Review pipeline",
+    handler: async (_args,ctx)=>{
+      if(!autoPipeline){ctx.ui.notify("No auto pipeline in this session.", "info");return;}
+      ctx.ui.notify(pipelineLines(autoPipeline).join("\n"),"info");
+    },
+  });
+  pi.registerCommand("jev-pipeline-stop", {
+    description:"Stop automatic advancement; keep plan, progress, and QA/Review findings",
+    handler: async (_args,ctx)=>{
+      cancelPipeline(ctx);
+      ctx.ui.notify("Automatic phase transitions disabled. Current task and session history remain.", "info");
+    },
+  });
+  pi.registerCommand("jev-pipeline-resume", {
+    description:"Resume a paused auto pipeline at its last unverified phase",
+    handler: async (_args,ctx)=>{
+      const p=autoPipeline;
+      if(!p || p.status!=="paused" || !["implement","qa","review"].includes(p.phase)){
+        ctx.ui.notify("No paused auto pipeline to resume.", "warning");return;
+      }
+      savePipeline({...p,status:"running",reason:undefined},ctx);
+      await runWorkflowCommand(p.phase as TaskType,"",ctx,false,true);
+      if(workflowTask!==p.phase){
+        savePipeline({...p,status:"paused",reason:"Could not activate "+p.phase},ctx);
+        ctx.ui.notify("Could not resume pipeline phase.", "error");
+        return;
+      }
+      const message=p.phase==="implement"
+        ? "Resume the approved plan implementation. Consult jev_progress for incomplete steps, complete the deliverables and verify them.\n\n"+(planDocument?.markdown??"")
+        : nextPhasePrompt(p.phase as "qa"|"review",planDocument?.markdown??"",
+            planDocument?.request);
+      pi.sendUserMessage(message,{deliverAs:"followUp"});
+    },
+  });
+
   pi.registerCommand("jev-plan-open", {
     description: "Review, edit or approve the latest saved Jev plan and choose what happens next",
     handler: async (_args, ctx) => { await openPlan(ctx); },
@@ -1572,6 +1713,7 @@ export default function (pi: ExtensionAPI) {
     description: "Leave explicit task phase and restore automatic Jev routing / tools",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle?.();
+      cancelPipeline(ctx,"User exited to automatic model routing");
       changeWorkflow(undefined);
       implementationHandoffPending = false;
       showPlanSummary(ctx, false);
@@ -1597,6 +1739,7 @@ export default function (pi: ExtensionAPI) {
         `\nPi selected model: ${ctx.model ? keyOf(ctx.model) : "unknown"}` +
         `\nWorkflow phase: ${workflowTask ?? "auto"}${isStrictPhase(workflowTask) ? " [READ ONLY]" : ""}` +
         `\nPlan: ${planDocument ? "v" + planDocument.version + " " + planDocument.status : "none"} · widget ${planSummaryVisible ? "visible" : "hidden"}` +
+        `\nAuto pipeline: ${autoPipeline ? autoPipeline.phase + " · " + autoPipeline.status : "none"}` +
         `\nEligible models: ${physicalCandidates(config, ctx).length}/${config.models.filter(m => m.enabled).length} · cooldown=${health.list(config.models.map(m => m.key)).filter(s => s.status === "cooldown").length} · fallback=${config.fallback || "unset"}` +
         (isRoutingActive(config, ctx) ? "" : "\nTo activate routing now: /jev-on") +
         (d ? `\nLast: ${d.task} → ${d.model}, p=${d.probability.toFixed(2)} (${d.reason})` : ""),

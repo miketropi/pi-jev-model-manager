@@ -19,7 +19,7 @@ export const WORKFLOW_COMMANDS = {
 // the Jev HTTPS reader, interactive decisions and independently reviewed web tools.
 export const READONLY_TOOLS = new Set([
   "read", "grep", "find", "ls", "bash", "jev_web_fetch", "jev_ask_user",
-  "web_search", "web_fetch", "search_web", "fetch_url",
+  "web_search", "web_fetch", "search_web", "fetch_url", "jev_quality_gate",
 ]);
 export const WORKFLOW_ENTRY = "jev-workflow-phase";
 export const STRICT_PHASES = new Set<TaskType>(["plan", "review"]);

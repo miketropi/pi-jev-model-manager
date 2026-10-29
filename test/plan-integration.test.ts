@@ -83,6 +83,8 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   assert.match(sent.at(-1), /produce the finished article\/content/);
   assert.ok(sent.at(-1).includes("acceptance tests"));
   assert.equal(entries.at(-1).data.task,"implement");
+  assert.equal(entries.some(x=>x.customType==="jev-auto-pipeline"),false,
+    "manual Implement now must not start automatic QA/Review");
   assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
     "approved plan widget must disappear on handoff");
   assert.equal(messages.filter(x=>x.customType==="jev-plan-preview").length,2,

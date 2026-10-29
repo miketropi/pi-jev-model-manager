@@ -357,6 +357,43 @@ RELEASE_TAG=v0.8.1 npm run release:verify
 
 The initial `lint` step is a dependency-free syntax/structure gate, **not** complete semantic TypeScript type checking or full ESLint rules. That requires a compatible Pi SDK/TypeScript configuration and locked development dependencies.
 
+## Optional Auto Implement → QA → Review (v0.9.0)
+
+When a Jev plan has finished, the native Plan approval menu now offers **two different paths**, chosen once before execution:
+
+- **Implement now (approve plan)** — Manual mode. Runs Implementation only. QA and Review remain opt-in slash commands and **do not start automatically**.
+- **Auto Implement → QA → Review (approve plan)** — User explicitly authorizes the whole three-stage pipeline. Jev runs Implementation, then QA, then read-only Review, using the task-specific model and installed skills selected for each phase.
+
+Other choices remain: **View/edit plan**, **Refine with AI**, **Keep for later**, and **Cancel**.
+
+### Safety and phase transitions
+
+```text
+APPROVED PLAN
+  ├─ Implement now          → IMPLEMENT only (manual)
+  └─ Auto Implement → QA → Review
+       IMPLEMENT  (all checklist tasks verified)
+            ↓
+       QA  (jev_quality_gate: pass + evidence)
+            ↓
+       REVIEW  (read-only; jev_quality_gate: pass + evidence)
+            ↓
+       COMPLETE
+```
+
+Automatic continuation is **strictly gated**. Implementation must have every `jev_progress` checklist step marked done with a factual verification note before QA starts. QA and Review must call the new `jev_quality_gate` tool with a `pass` or `fail` verdict and evidence of checks performed before Jev advances. If a run is aborted, a result is missing, or a phase fails, Jev pauses/stops **without launching later phases**. It never silently assumes that an agent's final paragraph means the work was verified. There are no automatic fix/retry loops.
+
+If the agent forgets to update a checklist or gate, the pipeline intentionally pauses; use the following controls:
+
+- `/jev-pipeline-status` — Show stage, status, checks and stop reason.
+- `/jev-pipeline-resume` — Resume a **paused**, still-authorized phase (no implicit re-run after session reload).
+- `/jev-pipeline-stop` — Stop auto transitions immediately; retain session plan, completed checklist and QA/Review findings.
+- `/jev-auto` or a manual phase command — Leave/cancel automatic pipeline behavior.
+
+Pipeline decisions and results are stored in the **current Pi session**, so state can be examined after `/reload`. On session reload an in-flight pipeline is paused rather than automatically launching work. The QA phase can run tests; Review stays under the strict read-only tool guard, but can still call `jev_quality_gate` to record its verdict. Task routing continues to honor the user's per-phase model settings.
+
+**Limitations:** A tool-reported `pass` is an agent-provided declaration with a note, not independent proof of correctness. Verify important changes personally. The option and phase transitions are integration-tested with a mocked Pi extension runtime; live Pi TUI behavior depends on the installed Pi build. This version remains within the same Pi session rather than creating isolated sessions.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.
