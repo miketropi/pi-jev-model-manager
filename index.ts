@@ -14,6 +14,16 @@ import type {
 import { readFileSync, mkdirSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import {
+  DEFAULT_NINE_ROUTER_KEY_ENV,
+  DEFAULT_NINE_ROUTER_URL,
+  NINE_ROUTER_PROVIDER,
+  normalizeNineRouterBaseUrl,
+  scanNineRouter,
+  validateEnvName,
+  type DiscoveredModel,
+  type NineRouterSettings,
+} from "./nine-router.ts";
 
 const CONFIG_PATH = join(
   process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
@@ -34,6 +44,11 @@ interface ManagedModel {
   avoid: string;
   cost: CostTier;
   thinking: Thinking;
+  // These optional fields are used for models registered via the 9Router proxy.
+  reasoning?: boolean;
+  vision?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
 }
 interface Config {
   version: 1;
@@ -42,6 +57,7 @@ interface Config {
   classifier: { provider: string; model: string };
   fallback: string;
   minProbability: number;
+  nineRouter: NineRouterSettings;
   models: ManagedModel[];
 }
 interface Decision {
@@ -62,6 +78,7 @@ const defaults = (): Config => ({
   classifier: { provider: "typesafe", model: "jev-latest" },
   fallback: "",
   minProbability: 0.43,
+  nineRouter: { baseUrl: DEFAULT_NINE_ROUTER_URL, apiKeyEnv: DEFAULT_NINE_ROUTER_KEY_ENV },
   models: [],
 });
 
@@ -74,6 +91,7 @@ function readConfig(): Config {
       ...d,
       ...raw,
       classifier: { ...d.classifier, ...raw.classifier },
+      nineRouter: { ...d.nineRouter, ...raw.nineRouter },
       models: Array.isArray(raw.models) ? raw.models.filter((m) => typeof m?.key === "string") : [],
     };
   } catch (e) {
@@ -196,6 +214,137 @@ async function choose(
   }
 }
 
+/** Register the imported 9Router models as real Pi models. Never override the user's own 9router provider. */
+function syncNineRouterProvider(pi: ExtensionAPI, config: Config): void {
+  const imported = config.models.filter((m) => m.key.startsWith(`${NINE_ROUTER_PROVIDER}/`));
+  if (!imported.length) {
+    pi.unregisterProvider(NINE_ROUTER_PROVIDER);
+    return;
+  }
+  const baseUrl = normalizeNineRouterBaseUrl(config.nineRouter.baseUrl);
+  const envName = validateEnvName(config.nineRouter.apiKeyEnv);
+  pi.registerProvider(NINE_ROUTER_PROVIDER, {
+    name: "9Router · Jev Manager",
+    baseUrl,
+    apiKey: `$${envName}`,
+    api: "openai-completions",
+    authHeader: true,
+    models: imported.map((m) => ({
+      id: m.key.slice(NINE_ROUTER_PROVIDER.length + 1),
+      name: m.label,
+      reasoning: m.reasoning ?? false,
+      input: (m.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
+      // 9Router does not guarantee live price metadata. These are placeholders, not price estimates.
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: m.contextWindow ?? 128_000,
+      maxTokens: Math.min(m.maxTokens ?? 8_192, m.contextWindow ?? 128_000),
+    })),
+  });
+}
+
+function newNineRouterManagedModel(remote: DiscoveredModel): ManagedModel {
+  return {
+    key: `${NINE_ROUTER_PROVIDER}/${remote.id}`,
+    label: remote.name,
+    enabled: true,
+    specialty: "General software engineering (edit capabilities after import)",
+    avoid: "",
+    cost: "balanced", // policy preference, not billed price
+    thinking: "off", // safe until user confirms that reasoning effort is supported
+    reasoning: false,
+    vision: false,
+    contextWindow: remote.contextWindow ?? 128_000,
+    maxTokens: Math.min(remote.maxTokens ?? 8_192, remote.contextWindow ?? 128_000),
+  };
+}
+
+/** Explicit import only: never rewrite hand-authored capabilities on subsequent scans. */
+function importNineRouterModel(config: Config, remote: DiscoveredModel): ManagedModel {
+  const key = `${NINE_ROUTER_PROVIDER}/${remote.id}`;
+  const existing = config.models.find((m) => m.key === key);
+  if (existing) return existing;
+  const model = newNineRouterManagedModel(remote);
+  config.models.push(model);
+  if (!config.fallback) config.fallback = model.key;
+  return model;
+}
+
+async function configureNineRouterSettings(ctx: ExtensionContext, config: Config): Promise<boolean> {
+  const baseUrlInput = await ctx.ui.input("9Router URL (instance root or /v1)", config.nineRouter.baseUrl);
+  if (baseUrlInput == null) return false;
+  const apiEnvInput = await ctx.ui.input("API key environment variable NAME (not the secret)", config.nineRouter.apiKeyEnv);
+  if (apiEnvInput == null) return false;
+  try {
+    config.nineRouter = {
+      baseUrl: normalizeNineRouterBaseUrl(baseUrlInput),
+      apiKeyEnv: validateEnvName(apiEnvInput),
+    };
+    saveConfig(config);
+    return true;
+  } catch (e) {
+    ctx.ui.notify(e instanceof Error ? e.message : "Invalid 9Router configuration", "warning");
+    return false;
+  }
+}
+
+async function scanAndImportNineRouter(pi: ExtensionAPI, ctx: ExtensionContext, config: Config): Promise<void> {
+  if (!ctx.hasUI) return;
+  let discovered: DiscoveredModel[];
+  try {
+    discovered = await scanNineRouter(config.nineRouter);
+  } catch (e) {
+    ctx.ui.notify(e instanceof Error ? e.message : "9Router scan failed", "error");
+    return;
+  }
+  if (!discovered.length) {
+    ctx.ui.notify("9Router returned zero valid model IDs.", "warning");
+    return;
+  }
+  let filter = "";
+  ctx.ui.notify(`Found ${discovered.length} 9Router IDs. Listing does not guarantee model availability or quota.`, "info");
+  while (true) {
+    const matches = discovered.filter((m) => `${m.id} ${m.name}`.toLowerCase().includes(filter.toLowerCase()));
+    const imported = new Set(config.models.map((m) => m.key));
+    const unseen = matches.filter((m) => !imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`));
+    const selectionMap = new Map<string, DiscoveredModel>();
+    const rows = matches.slice(0, 60).map((m, i) => {
+      const label = `${imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`) ? "✓" : "+"} ${m.id} [${i + 1}]`;
+      selectionMap.set(label, m);
+      return label;
+    });
+    const choice = await ctx.ui.select(`9Router · ${matches.length} matching · ${unseen.length} new${matches.length > 60 ? " · first 60 shown" : ""}`, [
+      `Filter: ${filter || "all"}`,
+      `Import all ${unseen.length} new matching models (max 30)`,
+      ...rows,
+      "Back",
+    ]);
+    if (!choice || choice === "Back") return;
+    if (choice.startsWith("Filter:")) {
+      const value = await ctx.ui.input("Filter by model name or ID (blank = all)", filter);
+      if (value !== undefined) filter = value.trim();
+    } else if (choice.startsWith("Import all ")) {
+      if (!unseen.length) {
+        ctx.ui.notify("No new models matching the filter", "info");
+      } else if (unseen.length > 30) {
+        ctx.ui.notify("Narrow the filter to 30 or fewer models before importing a batch. Large Jev candidate lists are inefficient.", "warning");
+      } else if (await ctx.ui.confirm("Import models?", `Add ${unseen.length} model(s) to Jev. You can edit capabilities later.`)) {
+        for (const m of unseen) importNineRouterModel(config, m);
+        saveConfig(config);
+        syncNineRouterProvider(pi, config);
+        ctx.ui.notify(`Imported ${unseen.length} model(s). Use /jev-models to edit strengths and costs.`, "info");
+      }
+    } else {
+      const remote = selectionMap.get(choice);
+      if (!remote) continue;
+      const model = importNineRouterModel(config, remote);
+      saveConfig(config);
+      syncNineRouterProvider(pi, config);
+      await configureModel(ctx, config, model);
+      syncNineRouterProvider(pi, config); // account for updated metadata or removal
+    }
+  }
+}
+
 async function configureModel(ctx: ExtensionContext, config: Config, model: ManagedModel): Promise<boolean> {
   while (true) {
     const choice = await ctx.ui.select(`Manage ${model.label}`, [
@@ -205,6 +354,12 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
       `Avoid: ${model.avoid || "—"}`,
       `Cost: ${model.cost}`,
       `Thinking: ${model.thinking}`,
+      ...(model.key.startsWith(`${NINE_ROUTER_PROVIDER}/`) ? [
+        `Reasoning supported: ${model.reasoning ? "yes" : "no"}`,
+        `Images supported: ${model.vision ? "yes" : "no"}`,
+        `Context window: ${model.contextWindow ?? 128000}`,
+        `Max output tokens: ${model.maxTokens ?? 8192}`,
+      ] : []),
       "Remove from registry", "Back",
     ]);
     if (!choice || choice === "Back") return true;
@@ -229,6 +384,27 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
       const value = await ctx.ui.select("Reasoning effort", [...THINKING]);
       if (value) model.thinking = value as Thinking;
     }
+    if (choice.startsWith("Reasoning supported:")) {
+      model.reasoning = !model.reasoning;
+      if (!model.reasoning) model.thinking = "off";
+    }
+    if (choice.startsWith("Images supported:")) model.vision = !model.vision;
+    if (choice.startsWith("Context window:")) {
+      const value = await ctx.ui.input("Context window tokens", String(model.contextWindow ?? 128000));
+      if (value != null) {
+        const n = Number(value);
+        if (Number.isSafeInteger(n) && n > 0 && n <= 10_000_000 && n >= (model.maxTokens ?? 8192)) model.contextWindow = n;
+        else ctx.ui.notify("Must be a positive integer at least as large as max output tokens (max 10M)", "warning");
+      }
+    }
+    if (choice.startsWith("Max output tokens:")) {
+      const value = await ctx.ui.input("Max output tokens", String(model.maxTokens ?? 8192));
+      if (value != null) {
+        const n = Number(value);
+        if (Number.isSafeInteger(n) && n > 0 && n <= (model.contextWindow ?? 128000)) model.maxTokens = n;
+        else ctx.ui.notify("Must be a positive integer no larger than context window", "warning");
+      }
+    }
     if (choice === "Remove from registry") {
       if (await ctx.ui.confirm("Remove model?", model.key)) {
         config.models = config.models.filter((m) => m.key !== model.key);
@@ -242,6 +418,9 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
 
 export default function (pi: ExtensionAPI) {
   let lastDecision: Decision | undefined;
+  // Saved imports are available immediately on startup, even when the proxy is offline.
+  // Discovery itself is intentionally manual and never sends task prompts to 9Router.
+  syncNineRouterProvider(pi, readConfig());
 
   pi.registerVirtualModel<RouteState>({
     provider: ROUTER_PROVIDER,
@@ -292,7 +471,10 @@ export default function (pi: ExtensionAPI) {
           `Mode: ${config.mode}`,
           `Fallback: ${config.fallback || "not set"}`,
           `Minimum probability: ${config.minProbability.toFixed(2)}`,
-          "Add a model from Pi catalog", ...names, "Done",
+          "Add a model from Pi catalog",
+          `9Router settings: ${config.nineRouter.baseUrl}`,
+          "Scan 9Router models",
+          ...names, "Done",
         ]);
         if (!choice || choice === "Done") break;
         if (choice.startsWith("Routing:")) config.enabled = !config.enabled;
@@ -307,6 +489,10 @@ export default function (pi: ExtensionAPI) {
             if (Number.isFinite(n) && n >= 0 && n <= 1) config.minProbability = n;
             else ctx.ui.notify("Enter a number between 0 and 1", "warning");
           }
+        } else if (choice.startsWith("9Router settings:")) {
+          if (await configureNineRouterSettings(ctx, config)) syncNineRouterProvider(pi, config);
+        } else if (choice === "Scan 9Router models") {
+          await scanAndImportNineRouter(pi, ctx, config);
         } else if (choice === "Add a model from Pi catalog") {
           const added = new Set(config.models.map((m) => m.key));
           const available = ctx.modelRegistry.getAvailable()
@@ -323,11 +509,23 @@ export default function (pi: ExtensionAPI) {
           }
         } else {
           const match = config.models.find((m) => choice.endsWith(`[${m.key}]`));
-          if (match) await configureModel(ctx, config, match);
+          if (match) {
+            await configureModel(ctx, config, match);
+            if (match.key.startsWith(`${NINE_ROUTER_PROVIDER}/`)) syncNineRouterProvider(pi, config);
+          }
         }
         saveConfig(config);
       }
       ctx.ui.notify(`Saved Jev configuration: ${CONFIG_PATH}`, "info");
+    },
+  });
+
+  pi.registerCommand("jev-scan", {
+    description: "Scan available 9Router models and import selected IDs into Jev",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      const config = readConfig();
+      await scanAndImportNineRouter(pi, ctx, config);
     },
   });
 

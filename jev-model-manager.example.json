@@ -2,7 +2,10 @@
   "version": 1,
   "enabled": false,
   "mode": "auto",
-  "classifier": { "provider": "typesafe", "model": "jev-latest" },
+  "classifier": {
+    "provider": "typesafe",
+    "model": "jev-latest"
+  },
   "fallback": "openai-codex/gpt-5.6-luna",
   "minProbability": 0.43,
   "models": [
@@ -33,5 +36,9 @@
       "cost": "premium",
       "thinking": "high"
     }
-  ]
+  ],
+  "nineRouter": {
+    "baseUrl": "http://127.0.0.1:20128/v1",
+    "apiKeyEnv": "NINEROUTER_API_KEY"
+  }
 }
