@@ -8,11 +8,14 @@ test("/jev-scan imports a proxy model as a usable Pi provider and preserves its 
   const dir = mkdtempSync(join(tmpdir(), "pi-jev-models-test-"));
   const oldDir = process.env.PI_CODING_AGENT_DIR;
   const oldKey = process.env.NINEROUTER_API_KEY;
+  const oldUrl = process.env.NINEROUTER_BASE_URL;
   const oldFetch = globalThis.fetch;
   process.env.PI_CODING_AGENT_DIR = dir;
   process.env.NINEROUTER_API_KEY = "test-key";
+  process.env.NINEROUTER_BASE_URL = "https://custom-gateway.example/api";
   let pass = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    assert.equal(url, "https://custom-gateway.example/api/v1/models");
     pass++;
     return new Response(JSON.stringify({ data: [
       { id: "cc/claude-test", name: pass === 1 ? "Claude Test" : "Renamed upstream", context_window: 200000, max_tokens: 16000 },
@@ -58,7 +61,8 @@ test("/jev-scan imports a proxy model as a usable Pi provider and preserves its 
     assert.equal(first.models[0].reasoning, false);
     assert.equal(first.fallback, "jev-9router/cc/claude-test");
     assert.equal(providers["jev-9router"].models[0].id, "cc/claude-test");
-    assert.equal(providers["jev-9router"].baseUrl, "http://127.0.0.1:20128/v1");
+    assert.equal(providers["jev-9router"].baseUrl, "https://custom-gateway.example/api/v1");
+    assert.equal(first.nineRouter.baseUrl, "http://127.0.0.1:20128/v1"); // override does not get persisted
     assert.equal(providers["jev-9router"].apiKey, "$NINEROUTER_API_KEY");
     assert.equal(providers["jev-9router"].api, "openai-completions");
     assert.equal(JSON.stringify(first).includes("test-key"), false);
@@ -83,6 +87,8 @@ test("/jev-scan imports a proxy model as a usable Pi provider and preserves its 
     else process.env.PI_CODING_AGENT_DIR = oldDir;
     if (oldKey === undefined) delete process.env.NINEROUTER_API_KEY;
     else process.env.NINEROUTER_API_KEY = oldKey;
+    if (oldUrl === undefined) delete process.env.NINEROUTER_BASE_URL;
+    else process.env.NINEROUTER_BASE_URL = oldUrl;
     rmSync(dir, { recursive: true, force: true });
   }
 });

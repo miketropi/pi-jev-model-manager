@@ -1,6 +1,7 @@
 /** 9Router discovery, deliberately separate from Pi so it can be tested offline. */
 export const NINE_ROUTER_PROVIDER = "jev-9router";
 export const DEFAULT_NINE_ROUTER_URL = "http://127.0.0.1:20128/v1";
+export const NINE_ROUTER_BASE_URL_ENV = "NINEROUTER_BASE_URL";
 export const DEFAULT_NINE_ROUTER_KEY_ENV = "NINEROUTER_API_KEY";
 
 export interface NineRouterSettings {
@@ -52,11 +53,20 @@ export function normalizeNineRouterBaseUrl(value: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
+/** An env override takes precedence over the persisted URL for BOTH discovery and generation. */
+export function resolveNineRouterBaseUrl(
+  settings: Pick<NineRouterSettings, "baseUrl">,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const override = env[NINE_ROUTER_BASE_URL_ENV]?.trim();
+  return normalizeNineRouterBaseUrl(override || settings.baseUrl);
+}
+
 export async function scanNineRouter(
   settings: NineRouterSettings,
   fetcher: typeof fetch = fetch,
 ): Promise<DiscoveredModel[]> {
-  const baseUrl = normalizeNineRouterBaseUrl(settings.baseUrl);
+  const baseUrl = resolveNineRouterBaseUrl(settings);
   const envName = validateEnvName(settings.apiKeyEnv);
   const apiKey = process.env[envName];
   if (!apiKey) throw new Error(`Missing ${envName}. Set it in the environment before starting Pi.`);

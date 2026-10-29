@@ -17,8 +17,10 @@ import { homedir } from "node:os";
 import {
   DEFAULT_NINE_ROUTER_KEY_ENV,
   DEFAULT_NINE_ROUTER_URL,
+  NINE_ROUTER_BASE_URL_ENV,
   NINE_ROUTER_PROVIDER,
   normalizeNineRouterBaseUrl,
+  resolveNineRouterBaseUrl,
   scanNineRouter,
   validateEnvName,
   type DiscoveredModel,
@@ -221,7 +223,7 @@ function syncNineRouterProvider(pi: ExtensionAPI, config: Config): void {
     pi.unregisterProvider(NINE_ROUTER_PROVIDER);
     return;
   }
-  const baseUrl = normalizeNineRouterBaseUrl(config.nineRouter.baseUrl);
+  const baseUrl = resolveNineRouterBaseUrl(config.nineRouter);
   const envName = validateEnvName(config.nineRouter.apiKeyEnv);
   pi.registerProvider(NINE_ROUTER_PROVIDER, {
     name: "9Router · Jev Manager",
@@ -270,7 +272,13 @@ function importNineRouterModel(config: Config, remote: DiscoveredModel): Managed
 }
 
 async function configureNineRouterSettings(ctx: ExtensionContext, config: Config): Promise<boolean> {
-  const baseUrlInput = await ctx.ui.input("9Router URL (instance root or /v1)", config.nineRouter.baseUrl);
+  const envOverride = process.env[NINE_ROUTER_BASE_URL_ENV]?.trim();
+  if (envOverride) {
+    ctx.ui.notify(`${NINE_ROUTER_BASE_URL_ENV} is set and overrides the saved URL. Change the environment variable and restart Pi to update the endpoint.`, "info");
+  }
+  const baseUrlInput = envOverride
+    ? config.nineRouter.baseUrl
+    : await ctx.ui.input("9Router URL (instance root or /v1; overridden by NINEROUTER_BASE_URL if set)", config.nineRouter.baseUrl);
   if (baseUrlInput == null) return false;
   const apiEnvInput = await ctx.ui.input("API key environment variable NAME (not the secret)", config.nineRouter.apiKeyEnv);
   if (apiEnvInput == null) return false;
@@ -472,7 +480,7 @@ export default function (pi: ExtensionAPI) {
           `Fallback: ${config.fallback || "not set"}`,
           `Minimum probability: ${config.minProbability.toFixed(2)}`,
           "Add a model from Pi catalog",
-          `9Router settings: ${config.nineRouter.baseUrl}`,
+          `9Router settings: ${resolveNineRouterBaseUrl(config.nineRouter)}${process.env[NINE_ROUTER_BASE_URL_ENV]?.trim() ? " [env]" : ""}`,
           "Scan 9Router models",
           ...names, "Done",
         ]);

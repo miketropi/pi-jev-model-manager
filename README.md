@@ -36,7 +36,19 @@ In Pi TUI:
 
 To enable global auto-discovery instead, copy the directory to `~/.pi/agent/extensions/jev-model-manager/`, and run `/reload`.
 
-## 9Router model discovery (new in v0.2)
+## 9Router model discovery (endpoint environment override in v0.2.1)
+
+### 9Router endpoint environment variable (v0.2.1)
+
+Set the 9Router base endpoint and key in the shell **before launching Pi**:
+
+```bash
+export NINEROUTER_BASE_URL="http://127.0.0.1:20128/v1"
+export NINEROUTER_API_KEY="your-9router-api-key"
+```
+
+A remote proxy should use HTTPS. The URL may point at the gateway root, /v1, or /v1/models; it is normalized to a /v1 base. A nonempty NINEROUTER_BASE_URL has priority over the saved nineRouter.baseUrl in the JSON config and the localhost default. The same resolved URL is used for both model scanning and generation. No endpoint or API key is written to JSON from the environment. When the environment override is active, the /jev-models UI shows [env]. Update the shell variable and restart Pi to change it. See .env.example for available variables. Pi does **not** load .env automatically.
+
 
 9Router documents `GET /v1/models` using an API key, returning a JSON object with a `data` array. Both a local gateway and a remote HTTPS instance can work.
 
