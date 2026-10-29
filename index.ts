@@ -11,8 +11,9 @@ import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
 import { registerPlanningTools } from "./planning-tools.ts";
 import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing.ts";
-import { PLAN_ENTRY, PLAN_MESSAGE, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
+import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
+import { RobotMotion } from "./robot-motion.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
@@ -75,6 +76,7 @@ interface Config {
   subagentRouting: boolean;
   health: HealthSettings;
   mascot: MascotStyle;
+  robotMotion: boolean;
 }
 interface Decision {
   model: string;
@@ -101,6 +103,7 @@ const defaults = (): Config => ({
   subagentRouting: false, // explicit opt-in: do not rewrite external spawn tools by default
   health: { ...DEFAULT_HEALTH },
   mascot: "mascot",
+  robotMotion: true,
 });
 
 function readConfig(): Config {
@@ -118,6 +121,7 @@ function readConfig(): Config {
       subagentRouting: raw.subagentRouting === true,
       health: normalizeHealthSettings(raw.health),
       mascot: normalizeMascotStyle(raw.mascot),
+      robotMotion: raw.robotMotion !== false,
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);
@@ -144,8 +148,14 @@ function isRoutingActive(config: Config, ctx: ExtensionContext): boolean {
   return config.enabled && config.mode === "auto" && isJevSelected(ctx.model);
 }
 
-function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStatus): void {
-  if (ctx.mode !== "tui") return;
+let robotView: { ctx: ExtensionContext; config: Config; status: MascotStatus } | undefined;
+let robotFrame = 0;
+let robotAnimator: RobotMotion | undefined;
+
+function paintRobot(frame: number): void {
+  robotFrame = frame;
+  if (!robotView) return;
+  const { ctx, config, status } = robotView;
   const display: MascotStatus = isRoutingActive(config, ctx) ? status : {
     mood: "disabled",
     subtitle: config.enabled
@@ -154,8 +164,16 @@ function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStat
         : "Inactive · run /jev-on"
       : "Routing off · run /jev-on",
   };
-  const lines = mascotLines(config.mascot, display);
+  const lines = mascotLines(config.mascot, display, robotFrame);
   ctx.ui.setWidget(MASCOT_WIDGET_KEY, lines.length ? lines : undefined);
+}
+
+function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStatus): void {
+  if (ctx.mode !== "tui") return;
+  robotView = { ctx, config, status };
+  if ((config.mascot !== "mascot" || !config.robotMotion || !isRoutingActive(config, ctx))
+    && robotAnimator?.running) robotAnimator.stop();
+  paintRobot(robotFrame);
 }
 
 function keyOf(model: { provider: string; id: string }): string {
@@ -600,6 +618,7 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       "Routing & classifier options",
       "Task routing (/jev-tasks)",
       `TUI mascot: ${config.mascot}`,
+      `Robot animation: ${config.robotMotion ? "ON" : "OFF"}`,
       "Model health & failover (/jev-health)",
       `Subagent auto-routing: ${config.subagentRouting ? "ON" : "OFF"}`,
       "Test 9Router connection",
@@ -649,6 +668,10 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
         if (!selected) continue;
         config.mascot = selected.startsWith("Mascot") ? "mascot"
           : selected.startsWith("Compact") ? "compact" : "off";
+        saveConfig(config);
+        updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
+      } else if (choice.startsWith("Robot animation:")) {
+        config.robotMotion = !config.robotMotion;
         saveConfig(config);
         updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
       } else if (choice === "Model health & failover (/jev-health)") {
@@ -807,6 +830,10 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
 }
 
 export default function (pi: ExtensionAPI) {
+  robotAnimator?.stop();
+  robotView = undefined;
+  robotFrame = 0;
+  robotAnimator = new RobotMotion(paintRobot);
   // Register read-only research and interactive choice tools at startup.
   if (typeof pi.registerTool === "function") registerPlanningTools(pi);
   let lastDecision: Decision | undefined;
@@ -815,16 +842,31 @@ export default function (pi: ExtensionAPI) {
   let planDocument: PlanDocument | undefined;
   let planRunActive = false;
   let pendingPlanText: string | undefined;
+  let planSummaryVisible = false;
+  let implementationHandoffPending = false;
+  let planOriginalRequest: string | undefined;
+
+  function showPlanSummary(ctx: ExtensionContext, show: boolean, persist = true): void {
+    const nextVisible = show && planDocument?.status === "draft";
+    if (persist && nextVisible !== planSummaryVisible)
+      pi.appendEntry(PLAN_UI_ENTRY, { visible: nextVisible });
+    planSummaryVisible = nextVisible;
+    if (ctx.mode === "tui") ctx.ui.setWidget("jev-plan-summary",
+      planSummaryVisible && planDocument ? planPreview(planDocument) : undefined);
+  }
 
   function savePlan(document: PlanDocument, ctx: ExtensionContext): void {
     planDocument = document;
     pi.appendEntry(PLAN_ENTRY, document);
-    if (ctx.mode === "tui") ctx.ui.setWidget("jev-plan-summary", planPreview(document));
-    // Plan content appears as a formatted Markdown message and remains in the session.
-    pi.sendMessage({ customType: PLAN_MESSAGE,
-      content: document.markdown, display: true,
-      details: { version: document.version, status: document.status } },
-      { triggerTurn: false });
+    showPlanSummary(ctx, document.status === "draft");
+    // Publishing the plan a second time after approval confuses the next model:
+    // show it once during drafting only, never when entering Implementation.
+    if (document.status === "draft") {
+      pi.sendMessage({ customType: PLAN_MESSAGE,
+        content: document.markdown, display: true,
+        details: { version: document.version, status: document.status } },
+        { triggerTurn: false });
+    }
   }
 
   async function openPlan(ctx: ExtensionContext): Promise<void> {
@@ -842,7 +884,10 @@ export default function (pi: ExtensionAPI) {
         ["View / edit full plan", "Implement now (approve plan)",
          "Refine with AI", "Keep plan for later", "Cancel"],
       );
-      if (!choice || choice === "Keep plan for later" || choice === "Cancel") return;
+      if (!choice || choice === "Keep plan for later" || choice === "Cancel") {
+        showPlanSummary(ctx, false);
+        return;
+      }
       if (choice === "View / edit full plan") {
         const edited = await ctx.ui.editor("Jev Plan · Markdown (edit to revise)",
           planDocument.markdown);
@@ -862,12 +907,14 @@ export default function (pi: ExtensionAPI) {
         return;
       } else if (choice === "Implement now (approve plan)") {
         const approved = { ...planDocument, status: "approved" as const };
+        // Make Phase IMPLEMENT authoritative BEFORE queuing the new user turn.
         savePlan(approved, ctx);
         await runWorkflowCommand("implement", "", ctx);
         if (workflowTask !== "implement") {
           ctx.ui.notify("Could not switch to Implementation; approved plan remains saved.", "error");
           return;
         }
+        implementationHandoffPending = true;
         pi.sendUserMessage(implementationHandoff(approved), {deliverAs:"followUp"});
         return;
       }
@@ -899,6 +946,9 @@ export default function (pi: ExtensionAPI) {
     // No task state change when Jev cannot be activated.
     if (!await activateJev(pi, ctx)) return;
     changeWorkflow(task);
+    if (task === "plan" && args.trim()) planOriginalRequest = args.trim();
+    if (task !== "implement") implementationHandoffPending = false;
+    if (task !== "plan") showPlanSummary(ctx, false);
     if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
       `Jev ${task.toUpperCase()}${isStrictPhase(task) ? " · READ ONLY" : ""}`);
     pi.appendEntry(WORKFLOW_ENTRY, { task, toolsBeforeStrictPhase });
@@ -909,11 +959,17 @@ export default function (pi: ExtensionAPI) {
   const health = new ModelHealth();
 
   pi.on?.("session_start", (_event, ctx) => {
+    robotView = undefined;
+    robotAnimator?.stop();
+    implementationHandoffPending = false;
     planRunActive = false;
     pendingPlanText = undefined;
-    planDocument = latestPlanFromBranch(ctx.sessionManager?.getBranch?.() ?? []);
-    if (ctx.mode === "tui") ctx.ui.setWidget("jev-plan-summary",
-      planDocument ? planPreview(planDocument) : undefined);
+    const branch = ctx.sessionManager?.getBranch?.() ?? [];
+    planDocument = latestPlanFromBranch(branch);
+    planOriginalRequest = planDocument?.request;
+    const savedUi = [...branch].reverse().find((e: any) =>
+      e?.type === "custom" && e.customType === PLAN_UI_ENTRY);
+    planSummaryVisible = savedUi?.data?.visible === true;
     // Restore phase when resuming/reloading; session-specific entries avoid global leakage.
     workflowTask = undefined;
     toolsBeforeStrictPhase = undefined;
@@ -931,6 +987,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     const config = readConfig();
+    showPlanSummary(ctx, workflowTask === "plan" && planSummaryVisible, false);
     if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
       workflowTask ? `Jev ${workflowTask.toUpperCase()}${isStrictPhase(workflowTask) ? " · READ ONLY" : ""}` : undefined);
     updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
@@ -946,34 +1003,56 @@ export default function (pi: ExtensionAPI) {
     });
   });
   // Mark the character ready at the end of a turn, retaining the last routed model.
-  pi.on?.("agent_end", (event, ctx) => {
+  pi.on?.("agent_end", (event) => {
     if (workflowTask === "plan" && planRunActive) {
       pendingPlanText = extractPlanText(event.messages) ?? pendingPlanText;
     }
+    // agent_end may be followed by an automatic retry or tool continuation.
+    // Keep animation active until the final agent_settled event.
+  });
+
+  pi.on?.("agent_start", (_event, ctx) => {
+    planRunActive = workflowTask === "plan";
+    pendingPlanText = undefined;
     const config = readConfig();
     updateJevling(ctx, config, {
-      mood: config.enabled ? "ready" : "disabled",
-      task: lastDecision?.task,
+      mood: config.enabled ? "routing" : "disabled",
+      task: workflowTask ?? lastDecision?.task,
       model: lastDecision
         ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model
         : undefined,
     });
-  });
-
-  pi.on?.("agent_start", () => {
-    planRunActive = workflowTask === "plan";
-    pendingPlanText = undefined;
+    if (ctx.mode === "tui" && config.robotMotion && config.mascot === "mascot"
+      && isRoutingActive(config, ctx)) robotAnimator?.start();
   });
 
   // Only run the interactive handoff after Pi has fully settled, not during retries.
-  pi.on?.("agent_settled", async (_event, ctx) => {
+  pi.on?.("agent_settled", async (event, ctx) => {
+    robotAnimator?.stop();
+    const config = readConfig();
+    updateJevling(ctx, config, {
+      mood: config.enabled ? "ready" : "disabled",
+      task: workflowTask ?? lastDecision?.task,
+      model: lastDecision
+        ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model
+        : undefined,
+    });
+    if (workflowTask === "implement") {
+      implementationHandoffPending = false;
+      showPlanSummary(ctx, false);
+    }
     if (!planRunActive) return;
     planRunActive = false;
     const text = pendingPlanText;
     pendingPlanText = undefined;
-    if (!text || workflowTask !== "plan") return;
-    savePlan(nextPlan(text, planDocument), ctx);
+    if (event?.aborted || !text || workflowTask !== "plan") return;
+    savePlan(nextPlan(text, planDocument, new Date(), planOriginalRequest), ctx);
     if (ctx.mode === "tui" && ctx.hasUI) await openPlan(ctx);
+  });
+
+  pi.on?.("session_shutdown", () => {
+    robotView = undefined;
+    robotAnimator?.stop();
   });
 
   // Track real provider outcomes instead of trusting the static Pi catalog.
@@ -993,6 +1072,9 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("before_agent_start", (event) => {
     if (!workflowTask) return;
+    if (workflowTask === "plan" && typeof event.prompt === "string"
+      && event.prompt.trim() && !event.prompt.startsWith("Revise the existing Jev plan"))
+      planOriginalRequest = event.prompt.trim().slice(0,2000);
     const skills = Array.isArray(event.systemPromptOptions?.skills)
       ? event.systemPromptOptions.skills as LoadedSkill[] : [];
     let instructions = instructionsForTask(workflowTask) + "\n\n" +
@@ -1000,7 +1082,10 @@ export default function (pi: ExtensionAPI) {
     if (workflowTask === "plan") {
       instructions += "\n\nPLAN DOCUMENT REQUIREMENT: On finishing the research, output a complete self-contained Markdown implementation plan. Include Goal, Evidence & assumptions, Decisions & tradeoffs, Numbered steps, Files to touch, Validation, Risks and Acceptance criteria. Do not implement it. Jev will save the final answer and ask the user whether to review, refine, keep or implement.";
     } else if (workflowTask === "implement" && planDocument?.status === "approved") {
-      instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Check for deviations and do not substitute an older draft.";
+      instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Do not produce another plan, planning document, review or outline instead of performing the final work.";
+      if (implementationHandoffPending) {
+        instructions += "\n\nCRITICAL APPROVAL HANDOFF: User selected IMPLEMENT NOW. Execute the approved deliverables immediately. For blog/content projects, WRITE THE FINAL ARTICLE; for code projects, IMPLEMENT CHANGES. Do NOT update/rewrite the plan artifact and do not return a plan again. Use allowed tools to complete the actual deliverable.";
+      }
     }
     return { systemPrompt: event.systemPrompt + "\n\n" + instructions };
   });
@@ -1249,10 +1334,14 @@ export default function (pi: ExtensionAPI) {
       const config = readConfig();
       const selected = await ctx.ui.select("Jevling · TUI mascot", [
         "Mascot (3 lines)", "Compact (1 line)", "Off (hidden)",
+        `Robot animation: ${config.robotMotion ? "ON" : "OFF"}`,
       ]);
       if (!selected) return;
-      config.mascot = selected.startsWith("Mascot") ? "mascot"
-        : selected.startsWith("Compact") ? "compact" : "off";
+      if (selected.startsWith("Robot animation:"))
+        config.robotMotion = !config.robotMotion;
+      else
+        config.mascot = selected.startsWith("Mascot") ? "mascot"
+          : selected.startsWith("Compact") ? "compact" : "off";
       saveConfig(config);
       updateJevling(ctx, config, {
         mood: config.enabled ? "ready" : "disabled",
@@ -1315,12 +1404,21 @@ export default function (pi: ExtensionAPI) {
     description: "Review, edit or approve the latest saved Jev plan and choose what happens next",
     handler: async (_args, ctx) => { await openPlan(ctx); },
   });
+  pi.registerCommand("jev-plan-hide", {
+    description: "Dismiss the plan summary widget; the saved plan is retained in this session",
+    handler: async (_args, ctx) => {
+      showPlanSummary(ctx, false);
+      ctx.ui.notify("Plan widget hidden. Use /jev-plan-open to review the saved plan again.", "info");
+    },
+  });
 
   pi.registerCommand("jev-auto", {
     description: "Leave explicit task phase and restore automatic Jev routing / tools",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle?.();
       changeWorkflow(undefined);
+      implementationHandoffPending = false;
+      showPlanSummary(ctx, false);
       pi.appendEntry(WORKFLOW_ENTRY, { task: null });
       if (ctx.hasUI) ctx.ui.setStatus("jev-workflow", undefined);
       ctx.ui.notify("Jev AUTO mode restored; explicit task intent cleared and original tools restored.", "info");
@@ -1341,6 +1439,7 @@ export default function (pi: ExtensionAPI) {
         `Jev routing ${isRoutingActive(config, ctx) ? "ACTIVE" : "INACTIVE"} · configured ${config.enabled ? "ON" : "OFF"} · mode ${config.mode}` +
         `\nPi selected model: ${ctx.model ? keyOf(ctx.model) : "unknown"}` +
         `\nWorkflow phase: ${workflowTask ?? "auto"}${isStrictPhase(workflowTask) ? " [READ ONLY]" : ""}` +
+        `\nPlan: ${planDocument ? "v" + planDocument.version + " " + planDocument.status : "none"} · widget ${planSummaryVisible ? "visible" : "hidden"}` +
         `\nEligible models: ${physicalCandidates(config, ctx).length}/${config.models.filter(m => m.enabled).length} · cooldown=${health.list(config.models.map(m => m.key)).filter(s => s.status === "cooldown").length} · fallback=${config.fallback || "unset"}` +
         (isRoutingActive(config, ctx) ? "" : "\nTo activate routing now: /jev-on") +
         (d ? `\nLast: ${d.task} → ${d.model}, p=${d.probability.toFixed(2)} (${d.reason})` : ""),

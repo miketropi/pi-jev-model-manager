@@ -11,11 +11,16 @@ test("plan documents are versioned, Markdown, and require explicit approval", ()
  assert.equal(one.version,1);assert.equal(one.status,"draft");
  assert.match(one.markdown,/^# Implementation Plan/);
  assert.throws(()=>implementationHandoff(one),/approved/);
- const two=nextPlan(one.markdown+"\nAdd regression tests.",one);
+ const two=nextPlan(one.markdown+"\nAdd regression tests.",one,new Date(),
+   "Plan a complete Vietnamese blog about recent Jev updates");
  assert.equal(two.version,2);
+ assert.match(two.request ?? "",/Vietnamese blog/);
  assert.equal(latestPlanFromBranch([{type:"custom",customType:"jev-plan-document",data:one},
     {type:"custom",customType:"jev-plan-document",data:two}]).version,2);
  assert.match(implementationHandoff({...two,status:"approved"}),/Add regression tests/);
+ assert.match(implementationHandoff({...two,status:"approved"}),/Original user request/);
+ assert.match(implementationHandoff({...two,status:"approved"}),/finished article/);
+ assert.ok(implementationHandoff({...two,status:"approved"}).startsWith("[JEV WORKFLOW HANDOFF"));
  assert.ok(extractPlanText([{role:"assistant",stopReason:"stop",
    content:[{type:"text",text:"Complete architecture plan. ".repeat(5)}]}]));
 });

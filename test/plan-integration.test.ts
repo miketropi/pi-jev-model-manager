@@ -52,8 +52,11 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   const beforeCancel=sent.length;
   await commands["jev-plan-open"].handler("",ctx);
   assert.equal(sent.length,beforeCancel,"Cancel must never trigger execution");
+  assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
+    "Cancel must dismiss the plan widget");
   await events.session_start({reason:"reload"},ctx);
-  assert.ok(status.some(x=>x[0]==="jev-plan-summary" && x[1]?.[0]?.includes("JEV PLAN")));
+  assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
+    "Cancel must stay dismissed across reloads");
   option="Keep plan for later";
   assert.equal(active.includes("write"),false,"Plan cannot write");
   assert.equal(sent.length,1,"Keep later doesn't auto-implement");
@@ -68,9 +71,29 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   await commands["jev-plan-open"].handler("",ctx);
   assert.ok(entries.some(x=>x.customType==="jev-plan-document"&&x.data.status==="approved"));
   assert.equal(active.includes("write"),true);
-  assert.ok(sent.at(-1).includes("approved Jev plan"));
+  assert.match(sent.at(-1), /IMPLEMENTATION REQUIRED/);
+  assert.match(sent.at(-1), /produce the finished article\/content/);
   assert.ok(sent.at(-1).includes("acceptance tests"));
   assert.equal(entries.at(-1).data.task,"implement");
+  assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
+    "approved plan widget must disappear on handoff");
+  assert.equal(messages.filter(x=>x.customType==="jev-plan-preview").length,2,
+    "approval must not reinject another planning message");
+  const nextPrompt = events.before_agent_start({systemPrompt:"Original system prompt"},ctx);
+  assert.match(nextPrompt.systemPrompt,/CRITICAL APPROVAL HANDOFF/);
+  assert.match(nextPrompt.systemPrompt,/Do NOT update\/rewrite the plan/);
+  assert.doesNotMatch(nextPrompt.systemPrompt,/PLAN DOCUMENT REQUIREMENT/);
+  await events.agent_start({},ctx);
+  await events.agent_end({messages:[{role:"assistant",stopReason:"stop",
+    content:[{type:"text",text:"Finished delivery."}]}]},ctx);
+  await events.agent_settled({},ctx);
+  assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
+    "plan widget stays dismissed after implementation finishes");
+  await events.session_start({reason:"reload"},ctx);
+  assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
+    "approved plan widget stays hidden on /reload");
+  await commands["jev-plan-hide"].handler("",ctx);
+  assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined);
  }finally{
    if(prev===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=prev;
    rmSync(dir,{recursive:true,force:true});

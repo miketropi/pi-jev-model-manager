@@ -67,6 +67,12 @@ test("Pi TUI shows mascot on session start; toggle modes persist, don't replace 
     style = "Mascot (3 lines)";
     await cmds["jev-mascot"].handler("", ctx);
     assert.equal(widgets.at(-1)?.[1]?.length, 3);
+    style = "Robot animation: ON";
+    await cmds["jev-mascot"].handler("", ctx);
+    const current = JSON.parse(readFileSync(join(dir,"jev-model-manager.json"),"utf8"));
+    assert.equal(current.robotMotion,false,"motion can be disabled without hiding robot");
+    assert.equal(current.mascot,"mascot");
+    assert.equal(widgets.at(-1)?.[1]?.length,3);
 
     const before = widgets.length;
     await events.session_start({}, { ...ctx, mode: "rpc" });

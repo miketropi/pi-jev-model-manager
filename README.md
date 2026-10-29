@@ -6,7 +6,7 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 
 ## Features
 - Plan/Review can perform read-only web research and open native user-choice menus without editing files.
-- Jevling robot: a compact static terminal mascot with no animations or timers.
+- Jevling robot: a compact three-line TUI companion with subtle cancellable eye/antenna animation during active agent turns.
 - A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
@@ -104,7 +104,7 @@ In Pi, run `/jev-mascot` or choose **TUI mascot** in `/jev-config` to select:
 - **Compact:** one-line badge (for small terminals).
 - **Off:** hides the widget entirely.
 
-The preference is saved in `jev-model-manager.json` and survives restarts. Jevling requires Pi **TUI mode**; it does not render in RPC, JSON or print mode. It is static (no animation, timers, network calls, model tokens or extra prompts) and has its own namespaced widget key.
+The preference is saved in `jev-model-manager.json` and survives restarts. Jevling requires Pi **TUI mode**; it does not render in RPC, JSON or print mode. From v0.7.1 it supports subtle eye/antenna motion during agent turns, with cancellable timers; no extra network calls, model tokens or prompts. Motion is configurable in /jev-mascot.
 
 ## Activate routing in your Pi session (v0.5.2)
 
@@ -228,6 +228,36 @@ Reopen the saved plan at any time with `/jev-plan-open`, including after `/reloa
 ```
 
 **Important limits:** The final plan is based on the model's Markdown response; Jev cannot guarantee every heading is present, but provides a structured planning contract. The plan-action menu requires Pi interactive UI. In noninteractive modes, the plan is saved but not approved automatically. Skill matching is advisory — it does not guarantee the model followed a skill. Avoid adopting untrusted third-party skill packs without reviewing their instructions.
+
+## Reliable Plan Handoff & Robot Motion (v0.7.1)
+
+### Implement now executes the approved deliverable
+
+When you select **Implement now**, Jev now:
+- Marks the plan approved and stops presenting it as a fresh planning message.
+- Restores write/build tools and switches the explicit workflow to **Implementation** before submitting the next user turn.
+- Sends a direct execution contract: **do not rewrite, review or expand the plan as the deliverable**. For content tasks, produce the finished blog/article; for code tasks, implement and verify the code.
+- Preserves the **original user request** alongside the plan so the Implementation model can distinguish "plan a blog" from "write the blog".
+- Injects a clear Implementation handoff instruction into the next model request.
+- Clears the plan summary after handoff and once the implementation turn has fully settled.
+
+This reduces accidental re-planning. No prompt-level guard can guarantee every model follows instructions perfectly; verify the resulting code/content and `/jev-status` if a provider behaves unexpectedly.
+
+### Plan summary is dismissible
+
+The permanent multi-line plan widget has been replaced with a **small three-line summary** (title, version/status and actions).
+
+- **Implement now**, **Keep plan for later**, and **Cancel** dismiss the widget.
+- `/jev-plan-hide` explicitly hides the widget **without deleting the saved plan**.
+- `/jev-plan-open` reopens the saved plan and its review/edit/approve menu.
+- Hidden state survives `/reload` and session resume; completed implementation does not resurrect a previously approved plan.
+- `/jev-auto` clears the plan widget when leaving the explicit workflow.
+
+### Robot animation (subtle, optional)
+
+Jevling stays the **original robot**, not the duck. While an agent is running, it occasionally shifts its eyes, blinks or changes the antenna diamond **without shifting task/model columns**. Each motion frame is brief; pauses are intentionally longer to avoid jitter. Animation stops after Pi's final `agent_settled` event, when switching sessions, or on shutdown. There is no new LLM/API use.
+
+Use `/jev-mascot` → **Robot animation: ON/OFF**, or `/jev-config` → **Robot animation**. Motion defaults to ON; Compact and Off mascot styles remain static.
 
 ## How to use
 

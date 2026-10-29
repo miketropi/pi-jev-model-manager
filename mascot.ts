@@ -1,6 +1,6 @@
 /**
  * Jevling — original terminal mascot for Jev Model Manager.
- * No animations/timers, no terminal escape sequences, no extra network calls.
+ * Pure three-line character renderer; sparse animation is driven separately by RobotMotion.
  */
 export type MascotStyle = "mascot" | "compact" | "off";
 export type MascotMood = "ready" | "routing" | "recovery" | "disabled";
@@ -24,7 +24,7 @@ export function cleanMascotText(value: string | undefined, maxLength = 36): stri
   return [...safe].length > maxLength ? [...safe].slice(0, maxLength - 1).join("") + "…" : safe;
 }
 
-export function mascotLines(style: MascotStyle, status: MascotStatus): string[] {
+export function mascotLines(style: MascotStyle, status: MascotStatus, frame = 0): string[] {
   if (style === "off") return [];
   const label = status.mood === "recovery" ? "RECOVERING"
     : status.mood === "routing" ? "ROUTING"
@@ -37,9 +37,16 @@ export function mascotLines(style: MascotStyle, status: MascotStatus): string[] 
   const subtitle = status.subtitle || (model ? `${task ? task + " · " : ""}${model}`
     : status.mood === "disabled" ? "Routing off · /jev-on" : "Smart model routing · /jev-config");
   if (style === "compact") return [`◇ JEV ${marker} ${label.toLowerCase()} · ${subtitle}`];
+  // Fixed-width eye and antenna frames: text columns never move.
+  const animated = status.mood === "routing" && Number.isInteger(frame);
+  const n = animated ? Math.max(0, Math.min(4, frame)) : 0;
+  const face = status.mood === "recovery" ? "•﹏•"
+    : status.mood === "disabled" ? "·_·"
+    : n === 1 ? "·ᴗ•" : n === 2 ? "•ᴗ·" : n === 3 ? "–ᴗ–" : "•ᴗ•";
+  const antenna = n === 4 ? "◆" : "◇";
   return [
-    `  ╭─◇─╮   JEV  ${marker} ${label}`,
-    `  │${status.mood === "recovery" ? "•﹏•" : status.mood === "disabled" ? "·_·" : "•ᴗ•"}│   ${subtitle}`,
+    `  ╭─${antenna}─╮   JEV  ${marker} ${label}`,
+    `  │${face}│   ${subtitle}`,
     "  ╰─┬─╯   /jev-mascot · change display",
   ];
 }
