@@ -8,6 +8,7 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 - A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
+- Explicit `/jev-plan`, `/jev-implement`, `/jev-debug`, `/jev-review`, `/jev-research`, `/jev-write`, `/jev-explain` and `/jev-auto` commands with mode-specific model assignment and read-only planning safeguards.
 - `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, `/jev-on`, and `/jev-mascot` for routing, health and TUI display controls.
 - `/jev-scan` to discover models from a 9Router OpenAI-compatible API and import **selected** model IDs.
 - Native `/jev-models` menu contains **9Router settings** and **Scan 9Router models**.
@@ -124,6 +125,50 @@ Jevling now reports **STANDBY / Inactive · run /jev-on** when the extension is 
 **Content creation:** `/jev-tasks` now includes **Writing & Content**, in addition to Planning, Implementation, Debugging, Code Review, Research and Explanation. This covers prompts such as `Plan gen một bài blog nói về lỗi PHP vừa rồi`. Jev classifies the task before routing; when a task category is uncertain, the standard confidence/fallback policy still applies.
 
 If `/jev-on` reports no eligible models, import or enable models using `/jev-scan` or `/jev-models`. If your Pi build cannot programmatically select the virtual model, use `/model` directly.
+
+## Explicit Task Commands & Strict Plan Mode (v0.6.0)
+
+Choose the workflow phase intentionally, without relying on Jev to guess a task from free-form prose. Commands activate the `jev-manager/auto` virtual model for the current Pi session, and use the matching rule in `/jev-tasks`.
+
+| Command | Behavior |
+|---|---|
+| `/jev-plan [task]` | **Strict read-only planning**: analyze, explore, compare, create a numbered plan; never implement |
+| `/jev-implement [task]` | Implement code or execute a previously agreed plan; normal tools restored |
+| `/jev-debug [task]` | Diagnose and fix defects, then verify |
+| `/jev-review [task]` | **Read-only code review**: no edits, shell commands or subagent execution |
+| `/jev-research [task]` | Gather evidence and compare approaches |
+| `/jev-write [task]` | Draft a blog post, documentation or other content |
+| `/jev-explain [task]` | Explain a concept without unnecessary modifications |
+| `/jev-auto` | Exit explicit task phase, restore prior tools, and return to automatic Jev classification |
+
+### Recommended two-step workflow
+
+```text
+/jev-plan Design a donation Gutenberg block with Stripe integration
+# Jev selects the Planning model, investigates existing files, produces a plan,
+# but cannot write files or run code.
+/jev-status
+# Workflow phase: plan [READ ONLY]
+
+/jev-implement Implement the plan we just agreed on
+# Jev selects the Implementation model and restores your previous active tools.
+# The agent can now edit files and run tests.
+
+/jev-review Review the change for regressions and security issues
+# Read-only review model and tool policy.
+/jev-auto
+# Return to Jev automatic classification.
+```
+
+**Plan Mode is enforced at the tool layer**, not just by wording in the prompt. It temporarily limits Pi's active tool set to the built-in `read`, `grep`, `find` and `ls` tools (if installed). A `tool_call` guard blocks **all** other LLM tool executions including `bash`, `write`, `edit`, external tools and subagent spawns, even if another extension makes them active. User `!`/`!!` shell commands are also rejected during strict Plan and Review modes. **Plan Mode does not run tests**, because shell execution is disabled. It can describe the tests that should be run during Implementation.
+
+**This is a workflow guard, not an OS sandbox.** It cannot prevent independent external processes, uncooperative extensions performing direct filesystem writes outside Pi's tool-call hooks, or manually modifying files outside Pi.
+
+**Phase persists** across follow-up user messages and session reloads/resumes using private Pi session metadata. Calling a different explicit task command changes the phase; `/jev-auto` resets it. The previous active tools are restored when leaving Plan/Review. No task phase leaks into unrelated Pi sessions.
+
+**No arguments?** Running `/jev-plan` alone enters read-only planning mode; your next normal message is treated as a planning request. Likewise, `/jev-implement` without arguments switches to implementation mode without sending a new prompt. With arguments, the command submits the task to Pi as a user turn. These names are deliberately prefixed (`/jev-plan` rather than `/plan`) to avoid conflicts with other Pi extensions and prompt templates.
+
+**Routing policy:** For explicit `Prefer` or `Force` rules, Jev chooses the configured eligible model without classifying the task again. For `Auto` rules, Jev can still select the physical model, but the chosen workflow phase remains explicit. Use `/jev-tasks` to assign different models to Planning, Implementation, Review, Writing and more.
 
 ## How to use
 
@@ -371,7 +416,7 @@ On Node.js 22+, from the project directory:
 npm test
 ```
 
-The tests use simulated 9Router responses and a mock Pi extension API, not live credentials or network services.
+The tests use simulated 9Router responses and a mock Pi extension API, not live credentials or network services. Explicit workflow tests cover Plan → Review → Implement → Auto, tool blocking and restoration, persistent session phase and explicit model selection.
 
 ## Further reading
 - https://pi.dev/docs/latest/virtual-models

@@ -6,8 +6,9 @@
  * TypeSafe classifier credentials: TYPESAFE_API_KEY.
  */
 import type { Message } from "@earendil-works/pi-ai";
-import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules } from "./task-routing.ts";
+import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules, type TaskType } from "./task-routing.ts";
 import { configureTaskRules } from "./task-ui.ts";
+import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
@@ -803,10 +804,58 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
 
 export default function (pi: ExtensionAPI) {
   let lastDecision: Decision | undefined;
+  let workflowTask: TaskType | undefined;
+  let toolsBeforeStrictPhase: string[] | undefined;
+
+  function changeWorkflow(task: TaskType | undefined): void {
+    const wasStrict = isStrictPhase(workflowTask);
+    const nextStrict = isStrictPhase(task);
+    // Preserve the actual user/extension-selected tool set; never restore a hardcoded default.
+    if (nextStrict && !wasStrict) {
+      toolsBeforeStrictPhase = pi.getActiveTools();
+      pi.setActiveTools(toolsForPhase(toolsBeforeStrictPhase, task!));
+    } else if (wasStrict && !nextStrict && toolsBeforeStrictPhase) {
+      pi.setActiveTools(toolsBeforeStrictPhase);
+      toolsBeforeStrictPhase = undefined;
+    }
+    workflowTask = task;
+  }
+
+  async function runWorkflowCommand(task: TaskType, args: string, ctx: ExtensionContext): Promise<void> {
+    // Do not lift a previous read-only guard while its turn is still executing.
+    await ctx.waitForIdle?.();
+    // No task state change when Jev cannot be activated.
+    if (!await activateJev(pi, ctx)) return;
+    changeWorkflow(task);
+    if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
+      `Jev ${task.toUpperCase()}${isStrictPhase(task) ? " · READ ONLY" : ""}`);
+    pi.appendEntry(WORKFLOW_ENTRY, { task, toolsBeforeStrictPhase });
+    ctx.ui.notify(`Jev ${task.toUpperCase()} active${isStrictPhase(task) ? " · read-only tool guard" : ""}. Use /jev-auto to reset.`, "info");
+    if (args.trim()) pi.sendUserMessage(args.trim(), { deliverAs: "followUp" });
+  }
+
   const health = new ModelHealth();
 
   pi.on?.("session_start", (_event, ctx) => {
+    // Restore phase when resuming/reloading; session-specific entries avoid global leakage.
+    workflowTask = undefined;
+    toolsBeforeStrictPhase = undefined;
+    const entries = ctx.sessionManager?.getBranch?.() ?? [];
+    const latest = [...entries].reverse().find((e: any) => e.type === "custom"
+      && e.customType === WORKFLOW_ENTRY);
+    const saved = latest?.data;
+    if (saved && (saved.task === null || saved.task in WORKFLOW_COMMANDS)) {
+      workflowTask = saved.task ?? undefined;
+      if (isStrictPhase(workflowTask)) {
+        toolsBeforeStrictPhase = Array.isArray(saved.toolsBeforeStrictPhase)
+          ? saved.toolsBeforeStrictPhase.filter((x: unknown) => typeof x === "string")
+          : pi.getActiveTools();
+        pi.setActiveTools(toolsForPhase(pi.getActiveTools(), workflowTask!));
+      }
+    }
     const config = readConfig();
+    if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
+      workflowTask ? `Jev ${workflowTask.toUpperCase()}${isStrictPhase(workflowTask) ? " · READ ONLY" : ""}` : undefined);
     updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
     // Do not hijack sessions that intentionally selected a physical model.
     if (ctx.mode === "tui" && config.enabled && !isJevSelected(ctx.model)) {
@@ -846,6 +895,18 @@ export default function (pi: ExtensionAPI) {
       health.reportSuccess(key);
     }
   });
+  pi.on?.("before_agent_start", (event) => {
+    if (!workflowTask) return;
+    return { systemPrompt: event.systemPrompt + "\n\n" + instructionsForTask(workflowTask) };
+  });
+  pi.on?.("user_bash", () => {
+    if (!isStrictPhase(workflowTask)) return;
+    return { result: {
+      output: `Blocked: Jev ${workflowTask} is strictly read-only. Use /jev-implement or /jev-auto first.`,
+      exitCode: 1, cancelled: false, truncated: false,
+    }};
+  });
+
   // Saved imports are available immediately on startup, even when the proxy is offline.
   // Discovery itself is intentionally manual and never sends task prompts to 9Router.
   syncNineRouterProvider(pi, readConfig());
@@ -900,8 +961,11 @@ export default function (pi: ExtensionAPI) {
         return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
       }
       if (request.reason === "direct") {
-        const model = candidates.find(m => m.key === config.fallback) ?? candidates[0]
+        const base = candidates.find(m => m.key === config.fallback) ?? candidates[0]
           ?? fallbackModel(allCandidates, config);
+        const forced = workflowTask ? selectExplicitModel(workflowTask, base.key, base.key,
+          candidates.map(m => m.key), config.taskRules).model : base.key;
+        const model = candidates.find(m => m.key === forced) ?? base;
         updateJevling(ctx, config, {
           mood: config.enabled ? "routing" : "disabled", model: model.label,
         });
@@ -912,9 +976,31 @@ export default function (pi: ExtensionAPI) {
       }
       const base = fallbackModel(candidates, config);
       const prompt = lastUserText(request.messages);
-      const decision = prompt
-        ? await choose(prompt, config, candidates, ctx, request.signal)
-        : { model: base.key, task: "unknown", probability: 0, reason: "empty text prompt" };
+      let decision: Decision;
+      if (workflowTask) {
+        const rule = config.taskRules[workflowTask];
+        // Prefer/Force bypass Jev task classification: the explicit command is authoritative.
+        if (rule && rule.mode !== "auto") {
+          const chosen = selectExplicitModel(workflowTask, base.key, base.key,
+            candidates.map(m => m.key), config.taskRules);
+          decision = { model: chosen.model, task: workflowTask, probability: 1, reason: chosen.reason };
+        } else {
+          // Auto still lets Jev rank models, but may not reclassify the explicit phase.
+          const auto = prompt
+            ? await choose(`Task phase: ${workflowTask}. ${prompt}`, {
+                ...config, taskRules: defaultTaskRules(),
+              }, candidates, ctx, request.signal)
+            : { model: base.key, task: workflowTask, probability: 0, reason: "empty text prompt" };
+          const chosen = selectExplicitModel(workflowTask, auto.model, base.key,
+            candidates.map(m => m.key), config.taskRules);
+          decision = { model: chosen.model, task: workflowTask,
+            probability: auto.probability, reason: `explicit ${workflowTask} · ${auto.reason}` };
+        }
+      } else {
+        decision = prompt
+          ? await choose(prompt, config, candidates, ctx, request.signal)
+          : { model: base.key, task: "unknown", probability: 0, reason: "empty text prompt" };
+      }
       lastDecision = decision;
       const selected = config.mode === "observe" ? base : candidates.find((m) => m.key === decision.model) ?? base;
       const physical = resolveModel(ctx, selected.key);
@@ -937,6 +1023,11 @@ export default function (pi: ExtensionAPI) {
   // Does not touch the official reference "subagent" tool (its schema has no
   // model field) or override an explicit user/agent model selection.
   pi.on?.("tool_call", async (event, ctx) => {
+    // Strict plan/review mode: deny all write-capable tools, including bash,
+    // custom extensions, remote MCP tools, subagents and nested tool calls.
+    if (!canUseTool(workflowTask, event.toolName)) {
+      return { block: true, reason: `Jev ${workflowTask} is read-only. Use /jev-implement or /jev-auto before modifying files or running commands.` };
+    }
     const settings = readConfig();
     if (!settings.enabled || !settings.subagentRouting || settings.mode !== "auto") return;
     if (!["Agent", "agent_spawn", "spawn_agent", "subagent_spawn"].includes(event.toolName)) return;
@@ -1089,6 +1180,23 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  for (const [task, command] of Object.entries(WORKFLOW_COMMANDS) as [TaskType, string][]) {
+    pi.registerCommand(command, {
+      description: `Switch to ${task} phase${isStrictPhase(task) ? " (strict read-only)" : ""}; optionally supply a task prompt`,
+      handler: async (args, ctx) => { await runWorkflowCommand(task, args, ctx); },
+    });
+  }
+  pi.registerCommand("jev-auto", {
+    description: "Leave explicit task phase and restore automatic Jev routing / tools",
+    handler: async (_args, ctx) => {
+      await ctx.waitForIdle?.();
+      changeWorkflow(undefined);
+      pi.appendEntry(WORKFLOW_ENTRY, { task: null });
+      if (ctx.hasUI) ctx.ui.setStatus("jev-workflow", undefined);
+      ctx.ui.notify("Jev AUTO mode restored; explicit task intent cleared and original tools restored.", "info");
+    },
+  });
+
   pi.registerCommand("jev-on", {
     description: "Enable and activate Jev virtual routing for the current Pi session",
     handler: async (_args, ctx) => { await activateJev(pi, ctx); },
@@ -1102,6 +1210,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(
         `Jev routing ${isRoutingActive(config, ctx) ? "ACTIVE" : "INACTIVE"} · configured ${config.enabled ? "ON" : "OFF"} · mode ${config.mode}` +
         `\nPi selected model: ${ctx.model ? keyOf(ctx.model) : "unknown"}` +
+        `\nWorkflow phase: ${workflowTask ?? "auto"}${isStrictPhase(workflowTask) ? " [READ ONLY]" : ""}` +
         `\nEligible models: ${physicalCandidates(config, ctx).length}/${config.models.filter(m => m.enabled).length} · cooldown=${health.list(config.models.map(m => m.key)).filter(s => s.status === "cooldown").length} · fallback=${config.fallback || "unset"}` +
         (isRoutingActive(config, ctx) ? "" : "\nTo activate routing now: /jev-on") +
         (d ? `\nLast: ${d.task} → ${d.model}, p=${d.probability.toFixed(2)} (${d.reason})` : ""),
