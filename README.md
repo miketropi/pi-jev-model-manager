@@ -23,6 +23,23 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 - Set `TYPESAFE_API_KEY` in the environment used to launch Pi, for example `export TYPESAFE_API_KEY=...`.
 - Node.js compatible with your installed Pi build.
 
+## Quick Setup with AI Agent
+
+Paste this prompt into Pi, OMP, or another coding agent to install and configure the extension:
+
+```text
+Install and configure Pi Jev Model Manager:
+https://github.com/miketropi/pi-jev-model-manager
+
+- Read the README and follow the latest setup instructions.
+- Reuse my existing 9Router proxy and TypeSafe Jev credentials securely.
+- Scan available models, configure routing profiles and a fallback.
+- Enable jev-manager/auto and verify with real tests.
+- Preserve my Pi settings and avoid duplicate installations.
+
+Work autonomously where safe. Ask only when credentials or important decisions are required. Report the setup status and any remaining issues.
+```
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.
