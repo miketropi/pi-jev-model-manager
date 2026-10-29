@@ -8,7 +8,7 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 - A native virtual model: `jev-manager/auto`, selectable from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
-- `/jev-test <task>` dry-run, `/jev-status`, and `/jev-health` for live model-health controls.
+- `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, and `/jev-mascot` for live health and TUI display controls.
 - `/jev-scan` to discover models from a 9Router OpenAI-compatible API and import **selected** model IDs.
 - Native `/jev-models` menu contains **9Router settings** and **Scan 9Router models**.
 - Imported 9Router models become physical Pi models under `jev-9router/<original-model-id>` (e.g. `jev-9router/cc/claude-opus-...`), available immediately without overwriting an existing `9router` provider.
@@ -82,6 +82,26 @@ Pi's model catalog indicates configured/credentialed models, **not live provider
 **Example:** When an Antigravity model responds with an outage/HTTP 503, the addon records the failure and avoids that model during the cooldown. If Pi invokes its normal `retry` route and a healthy alternative exists, the retry switches to that model instead of blindly retrying Antigravity. Force/Prefer task targets that are cooling down become unavailable candidates and follow the existing fallback policy.
 
 **Limitations:** This is **observed, not guaranteed real-time availability**. Before a model has been called, its status is `unknown`; remote providers do not expose a universal free availability API. Automatic failover only happens at Pi's supported retry boundary, not after an arbitrary partially completed tool action. It cannot guarantee that the backup provider is healthy. Health history is in-memory and resets when Pi restarts or `/reload` runs. Independent Pi child processes have separate health caches unless a shared runner integration is added.
+
+## Jevling — Terminal Mascot (v0.5.1)
+
+Meet **Jevling**, a small, original terminal companion for Jev Model Manager. It lives in a dedicated widget **above Pi's editor**, without replacing the built-in header/footer or changing the agent's execution.
+
+```text
+  ╭─◇─╮   JEV  ◆ ROUTING
+  │•ᴗ•│   implement · your-selected-model
+  ╰─┬─╯   /jev-mascot · change display
+```
+
+The mascot changes its expression and label across **ready**, **routing**, **provider failover** and **standby** states. It returns to ready when the agent turn finishes. It shows the last selected model, not real-time token-stream telemetry.
+
+In Pi, run `/jev-mascot` or choose **TUI mascot** in `/jev-config` to select:
+
+- **Mascot (default):** the compact three-line character shown above.
+- **Compact:** one-line badge (for small terminals).
+- **Off:** hides the widget entirely.
+
+The preference is saved in `jev-model-manager.json` and survives restarts. Jevling requires Pi **TUI mode**; it does not render in RPC, JSON or print mode. It is static (no animation, timers, network calls, model tokens or extra prompts) and has its own namespaced widget key.
 
 ## How to use
 

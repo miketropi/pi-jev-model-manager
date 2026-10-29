@@ -8,6 +8,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules } from "./task-routing.ts";
 import { configureTaskRules } from "./task-ui.ts";
+import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
@@ -69,6 +70,7 @@ interface Config {
   taskRules: TaskRules;
   subagentRouting: boolean;
   health: HealthSettings;
+  mascot: MascotStyle;
 }
 interface Decision {
   model: string;
@@ -94,6 +96,7 @@ const defaults = (): Config => ({
   taskRules: defaultTaskRules(),
   subagentRouting: false, // explicit opt-in: do not rewrite external spawn tools by default
   health: { ...DEFAULT_HEALTH },
+  mascot: "mascot",
 });
 
 function readConfig(): Config {
@@ -110,6 +113,7 @@ function readConfig(): Config {
       taskRules: normalizeTaskRules(raw.taskRules),
       subagentRouting: raw.subagentRouting === true,
       health: normalizeHealthSettings(raw.health),
+      mascot: normalizeMascotStyle(raw.mascot),
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);
@@ -122,6 +126,16 @@ function saveConfig(config: Config): void {
   const temp = `${CONFIG_PATH}.${process.pid}.tmp`;
   writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
   renameSync(temp, CONFIG_PATH);
+}
+
+/**
+ * Jevling lives in a namespaced widget, never replacing Pi's own header/footer.
+ * TUI only: RPC, print and JSON executions remain unaffected.
+ */
+function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStatus): void {
+  if (ctx.mode !== "tui") return;
+  const lines = mascotLines(config.mascot, status);
+  ctx.ui.setWidget(MASCOT_WIDGET_KEY, lines.length ? lines : undefined);
 }
 
 function keyOf(model: { provider: string; id: string }): string {
@@ -519,6 +533,7 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       `Jev key: ${statusJev}`,
       "Routing & classifier options",
       "Task routing (/jev-tasks)",
+      `TUI mascot: ${config.mascot}`,
       "Model health & failover (/jev-health)",
       `Subagent auto-routing: ${config.subagentRouting ? "ON" : "OFF"}`,
       "Test 9Router connection",
@@ -561,6 +576,15 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
         await configureStoredKey(pi, ctx, config, "jev");
       } else if (choice === "Task routing (/jev-tasks)") {
         await configureTaskRules(ctx, config.taskRules, config.models.filter(m => m.enabled), () => saveConfig(config));
+      } else if (choice.startsWith("TUI mascot:")) {
+        const selected = await ctx.ui.select("Jevling · TUI display", [
+          "Mascot (3 lines)", "Compact (1 line)", "Off (hidden)",
+        ]);
+        if (!selected) continue;
+        config.mascot = selected.startsWith("Mascot") ? "mascot"
+          : selected.startsWith("Compact") ? "compact" : "off";
+        saveConfig(config);
+        updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
       } else if (choice === "Model health & failover (/jev-health)") {
         await configureHealthOptions(ctx, config, health);
       } else if (choice.startsWith("Subagent auto-routing:")) {
@@ -715,6 +739,22 @@ export default function (pi: ExtensionAPI) {
   let lastDecision: Decision | undefined;
   const health = new ModelHealth();
 
+  pi.on?.("session_start", (_event, ctx) => {
+    const config = readConfig();
+    updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
+  });
+  // Mark the character ready at the end of a turn, retaining the last routed model.
+  pi.on?.("agent_end", (_event, ctx) => {
+    const config = readConfig();
+    updateJevling(ctx, config, {
+      mood: config.enabled ? "ready" : "disabled",
+      task: lastDecision?.task,
+      model: lastDecision
+        ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model
+        : undefined,
+    });
+  });
+
   // Track real provider outcomes instead of trusting the static Pi catalog.
   // Observation must not mutate session messages or tool results.
   pi.on?.("message_end", (event) => {
@@ -769,6 +809,7 @@ export default function (pi: ExtensionAPI) {
             };
             lastDecision = decision;
             if (ctx.hasUI) ctx.ui.setStatus("jev-manager", `Jev recovery → ${next.label}`);
+            updateJevling(ctx, config, { mood: "recovery", task: decision.task, model: next.label });
             return {
               model: resolveModel(ctx, next.key)!,
               thinkingLevel: next.thinking,
@@ -785,6 +826,9 @@ export default function (pi: ExtensionAPI) {
       if (request.reason === "direct") {
         const model = candidates.find(m => m.key === config.fallback) ?? candidates[0]
           ?? fallbackModel(allCandidates, config);
+        updateJevling(ctx, config, {
+          mood: config.enabled ? "routing" : "disabled", model: model.label,
+        });
         return { model: resolveModel(ctx, model.key)!, thinkingLevel: model.thinking };
       }
       if (!candidates.length) {
@@ -802,6 +846,11 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) {
         ctx.ui.setStatus("jev-manager", `Jev ${config.mode}: ${selected.label} · ${decision.task}`);
       }
+      updateJevling(ctx, config, {
+        mood: config.enabled ? "routing" : "disabled",
+        task: decision.task,
+        model: selected.label,
+      });
       return { model: physical, thinkingLevel: selected.thinking, state: { last: decision, attempted: [selected.key] } };
     },
   });
@@ -913,6 +962,27 @@ export default function (pi: ExtensionAPI) {
       const config = readConfig();
       await configureTaskRules(ctx, config.taskRules,
         config.models.filter(m => m.enabled), () => saveConfig(config));
+    },
+  });
+
+  pi.registerCommand("jev-mascot", {
+    description: "Choose Jevling mascot, compact icon, or hide the TUI widget",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      const config = readConfig();
+      const selected = await ctx.ui.select("Jevling · TUI mascot", [
+        "Mascot (3 lines)", "Compact (1 line)", "Off (hidden)",
+      ]);
+      if (!selected) return;
+      config.mascot = selected.startsWith("Mascot") ? "mascot"
+        : selected.startsWith("Compact") ? "compact" : "off";
+      saveConfig(config);
+      updateJevling(ctx, config, {
+        mood: config.enabled ? "ready" : "disabled",
+        task: lastDecision?.task,
+        model: lastDecision ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model : undefined,
+      });
+      ctx.ui.notify(`Jevling display set to ${config.mascot}.`, "info");
     },
   });
 
