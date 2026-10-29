@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "enabled": false,
+  "mode": "auto",
+  "classifier": { "provider": "typesafe", "model": "jev-latest" },
+  "fallback": "openai-codex/gpt-5.6-luna",
+  "minProbability": 0.43,
+  "models": [
+    {
+      "key": "openai-codex/gpt-5.6-luna",
+      "label": "Builder • Fast",
+      "enabled": true,
+      "specialty": "Routine implementation, tests, CSS fixes, repetitive changes with clear acceptance criteria",
+      "avoid": "Large architectural decisions, critical production debugging",
+      "cost": "budget",
+      "thinking": "medium"
+    },
+    {
+      "key": "openai-codex/gpt-5.6-sol",
+      "label": "Engineer • Advanced",
+      "enabled": true,
+      "specialty": "Complex refactors, debugging, medium-sized feature implementation",
+      "avoid": "Very simple tasks where a cheaper model suffices",
+      "cost": "balanced",
+      "thinking": "high"
+    },
+    {
+      "key": "openai-codex/gpt-6-astra",
+      "label": "Architect • Deep reasoning",
+      "enabled": true,
+      "specialty": "Architecture, design tradeoffs, security-critical review, hard debugging",
+      "avoid": "Boilerplate, trivial edits, routine formatting",
+      "cost": "premium",
+      "thinking": "high"
+    }
+  ]
+}
