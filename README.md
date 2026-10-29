@@ -88,7 +88,7 @@ pi -e ./index.ts
 
 ```bash
 mkdir -p ~/.pi/agent/extensions/jev-model-manager
-cp index.ts nine-router.ts ~/.pi/agent/extensions/jev-model-manager/
+cp index.ts nine-router.ts secrets.ts config-ui.ts ~/.pi/agent/extensions/jev-model-manager/
 ```
 
 Start Pi normally, or use `/reload` if Pi is already open. Use **one installation method at a time** to avoid loading the same extension twice. When updating an existing global copy, update that copy too; `git pull` in a separate source checkout does not update the global installation automatically.
