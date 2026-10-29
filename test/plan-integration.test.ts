@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { defaultTaskRules } from "../task-routing.ts";
@@ -15,12 +15,12 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
  const config={version:1,enabled:true,mode:"auto",fallback:"test/planner",minProbability:.43,
   models:models.map(m=>({key:"test/"+m.id,label:m.id,enabled:true,specialty:"coding",avoid:"",cost:"balanced",thinking:"medium"})),
   taskRules:rules};
- const events={},commands={},entries=[],messages=[],sent=[],status=[],menus=[];
+ const events={},commands={},entries=[],messages=[],sent=[],status=[],menus=[],tools={};
  let model=models[0],active=["read","write","bash","edit","grep","find","ls"];
  let option="Keep plan for later",edits=0;
  const ctx={mode:"tui",hasUI:true,scopedModels:[],
    get model(){return model;},
-   sessionManager:{getBranch:()=>entries},
+   sessionManager:{getBranch:()=>entries,getSessionId:()=>"jev-test-session-01"},
    ui:{
     notify(){},setWidget(...x){status.push(x)},setStatus(){},
     select:async(title,choices)=>{menus.push(title);return option},
@@ -29,8 +29,10 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
    modelRegistry:{getAvailable:()=>models,find:(p,id)=>p==="jev-manager"?virt:models.find(x=>x.provider===p&&x.id===id)}
  };
  const pi={registerProvider(){},unregisterProvider(){},registerVirtualModel(){},
+    registerTool:(t)=>tools[t.name]=t,
     registerCommand:(n,c)=>commands[n]=c,on:(n,cb)=>events[n]=cb,
-    getActiveTools:()=>active,setActiveTools:(x)=>{active=x},getAllTools:()=>[],
+    getActiveTools:()=>active,setActiveTools:(x)=>{active=x},
+    getAllTools:()=>tools.jev_progress?[tools.jev_progress]:[],
     appendEntry:(type,data)=>entries.push({type:"custom",customType:type,data}),
     sendUserMessage:(txt)=>sent.push(txt),sendMessage:(m)=>messages.push(m),
     setModel:async(m)=>{model=m;return true},
@@ -69,8 +71,14 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   option="Implement now (approve plan)";
   ctx.ui.select=async()=>option;
   await commands["jev-plan-open"].handler("",ctx);
+  const {planMirrorPath}=await import("../plan-cache.ts");
+  const tempPlan=planMirrorPath("jev-test-session-01");
+  assert.ok(tempPlan && existsSync(tempPlan),"approved plan mirror is outside project");
   assert.ok(entries.some(x=>x.customType==="jev-plan-document"&&x.data.status==="approved"));
   assert.equal(active.includes("write"),true);
+  assert.ok(tools.jev_progress,"LLM progress tool is registered");
+  assert.ok(active.includes("jev_progress"),"Implementation enables progress reporting");
+  assert.match(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1]?.[0]??"",/JEV IMPLEMENT/);
   assert.match(sent.at(-1), /IMPLEMENTATION REQUIRED/);
   assert.match(sent.at(-1), /produce the finished article\/content/);
   assert.ok(sent.at(-1).includes("acceptance tests"));
@@ -87,8 +95,27 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   await events.agent_end({messages:[{role:"assistant",stopReason:"stop",
     content:[{type:"text",text:"Finished delivery."}]}]},ctx);
   await events.agent_settled({},ctx);
+  assert.equal(existsSync(tempPlan),false,"temporary file cleaned after implementation turn");
+  assert.equal(entries.filter(x=>x.customType==="jev-implementation-progress").at(-1)?.data.stage,"paused",
+    "unverified steps remain paused rather than silently completed");
+  assert.match(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1]?.[0]??"",/PAUSED/);
+  await events.session_start({reason:"reload"},ctx);
+  assert.match(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1]?.[0]??"",/PAUSED/,
+    "checklist should recover after /reload");
   assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
     "plan widget stays dismissed after implementation finishes");
+  await events.agent_start({},ctx);
+  assert.equal(existsSync(tempPlan),true,"temporary file restored outside repo when resuming");
+  const bad=await tools.jev_progress.execute("p1",
+    {action:"update",stepId:1,status:"done"},undefined,undefined,ctx);
+  assert.equal(bad.isError,true,"cannot claim completion without verification");
+  const good=await tools.jev_progress.execute("p2",
+    {action:"update",stepId:1,status:"done",note:"Verified final deliverable and acceptance checks"},
+    undefined,undefined,ctx);
+  assert.equal(good.details.stage,"complete");
+  assert.equal(existsSync(tempPlan),false,"verified completion removes temporary Markdown");
+  assert.equal(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1],undefined);
+  await events.agent_settled({},ctx);
   await events.session_start({reason:"reload"},ctx);
   assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
     "approved plan widget stays hidden on /reload");

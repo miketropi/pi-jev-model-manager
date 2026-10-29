@@ -14,6 +14,8 @@ import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing
 import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { RobotMotion } from "./robot-motion.ts";
+import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestProgress, progressLines, type Progress } from "./progress.ts";
+import { savePlanMirror, cleanPlanMirror, pruneOldPlanMirrors } from "./plan-cache.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
@@ -845,6 +847,32 @@ export default function (pi: ExtensionAPI) {
   let planSummaryVisible = false;
   let implementationHandoffPending = false;
   let planOriginalRequest: string | undefined;
+  let implementationProgress: Progress | undefined;
+  let trackedSessionId: string | undefined;
+  let progressToolInjected = false;
+
+  function showProgress(ctx: ExtensionContext): void {
+    if (ctx.mode !== "tui") return;
+    const p = implementationProgress;
+    const visible = workflowTask === "implement" && p?.visible
+      && p.stage !== "complete" && p.stage !== "cancelled";
+    ctx.ui.setWidget(PROGRESS_WIDGET, visible ? progressLines(p!) : undefined);
+  }
+
+  function saveProgress(p: Progress, ctx: ExtensionContext): void {
+    implementationProgress = p;
+    pi.appendEntry(PROGRESS_ENTRY, p);
+    showProgress(ctx);
+  }
+
+  function closeProgress(ctx: ExtensionContext): void {
+    if (implementationProgress && implementationProgress.stage !== "complete") {
+      saveProgress({...implementationProgress,stage:"cancelled",visible:false},ctx);
+    } else {
+      if (ctx.mode === "tui") ctx.ui.setWidget(PROGRESS_WIDGET,undefined);
+    }
+    cleanPlanMirror(trackedSessionId);
+  }
 
   function showPlanSummary(ctx: ExtensionContext, show: boolean, persist = true): void {
     const nextVisible = show && planDocument?.status === "draft";
@@ -858,6 +886,13 @@ export default function (pi: ExtensionAPI) {
   function savePlan(document: PlanDocument, ctx: ExtensionContext): void {
     planDocument = document;
     pi.appendEntry(PLAN_ENTRY, document);
+    // Canonical source is the Pi session. A private temporary Markdown mirror
+    // is optional and never uses ctx.cwd or the repository directory.
+    try {
+      savePlanMirror(trackedSessionId ?? ctx.sessionManager?.getSessionId?.(), document.markdown);
+    } catch {
+      if (ctx.hasUI) ctx.ui.notify("Jev plan is safe in session, but the global temporary mirror could not be written.", "warning");
+    }
     showPlanSummary(ctx, document.status === "draft");
     // Publishing the plan a second time after approval confuses the next model:
     // show it once during drafting only, never when entering Implementation.
@@ -886,6 +921,7 @@ export default function (pi: ExtensionAPI) {
       );
       if (!choice || choice === "Keep plan for later" || choice === "Cancel") {
         showPlanSummary(ctx, false);
+        cleanPlanMirror(trackedSessionId);
         return;
       }
       if (choice === "View / edit full plan") {
@@ -923,6 +959,10 @@ export default function (pi: ExtensionAPI) {
 
 
   function changeWorkflow(task: TaskType | undefined): void {
+    if (workflowTask === "implement" && task !== "implement" && progressToolInjected) {
+      pi.setActiveTools(pi.getActiveTools().filter(name=>name!=="jev_progress"));
+      progressToolInjected = false;
+    }
     const wasStrict = isStrictPhase(workflowTask);
     const nextStrict = isStrictPhase(task);
     // Restore the user's tool selection later, including tools activated by extensions.
@@ -946,15 +986,66 @@ export default function (pi: ExtensionAPI) {
     // No task state change when Jev cannot be activated.
     if (!await activateJev(pi, ctx)) return;
     changeWorkflow(task);
+    if (task === "implement" && planDocument?.status === "approved") {
+      if (!implementationProgress || implementationProgress.version !== planDocument.version
+        || ["cancelled","complete"].includes(implementationProgress.stage))
+        saveProgress(newProgress(planDocument.markdown,planDocument.version),ctx);
+      else saveProgress({...implementationProgress,stage:"running",visible:true},ctx);
+    } else if (task !== "implement" && implementationProgress?.visible) {
+      closeProgress(ctx);
+    }
     if (task === "plan" && args.trim()) planOriginalRequest = args.trim();
     if (task !== "implement") implementationHandoffPending = false;
     if (task !== "plan") showPlanSummary(ctx, false);
+    if (task === "implement" && typeof pi.getAllTools === "function") {
+      const registered = pi.getAllTools().some(t=>t.name==="jev_progress");
+      if (registered && !pi.getActiveTools().includes("jev_progress")) {
+        pi.setActiveTools([...pi.getActiveTools(),"jev_progress"]);
+        progressToolInjected = true;
+      }
+    }
+    showProgress(ctx);
     if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
       `Jev ${task.toUpperCase()}${isStrictPhase(task) ? " · READ ONLY" : ""}`);
     pi.appendEntry(WORKFLOW_ENTRY, { task, toolsBeforeStrictPhase });
     ctx.ui.notify(`Jev ${task.toUpperCase()} active${isStrictPhase(task) ? " · read-only tool guard" : ""}. Use /jev-auto to reset.`, "info");
     if (args.trim()) pi.sendUserMessage(args.trim(), { deliverAs: "followUp" });
   }
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name:"jev_progress",label:"Jev · Implementation Checklist",
+    description:"Report the current implementation step, verified completion, or a blocker. Use after each meaningful step; never mark done without verification.",
+    promptSnippet:"Update the live Jev implementation checklist as you work.",
+    promptGuidelines:["When in Jev IMPLEMENT mode, call jev_progress for each step change. Set status=done only with a factual verification note. Never claim untested work is complete."],
+    parameters:{type:"object",properties:{
+      action:{type:"string",enum:["list","update","set_steps"]},
+      stepId:{type:"number"},status:{type:"string",enum:["active","done","blocked"]},
+      note:{type:"string"},
+      steps:{type:"array",items:{type:"string"},maxItems:16},
+    },required:["action"],additionalProperties:false} as any,
+    async execute(_id,params,_signal,_onUpdate,ctx) {
+      const p=implementationProgress;
+      if (workflowTask !== "implement" || !p)
+        return {isError:true,content:[{type:"text",text:"No active implementation checklist. Select Implement now first."}]};
+      try{
+        if(params.action==="update"){
+          if(!Number.isInteger(params.stepId)||!["active","done","blocked"].includes(params.status))
+            throw Error("Supply valid stepId and status.");
+          saveProgress(changeProgress(p,params.stepId,params.status,params.note),ctx);
+        } else if(params.action==="set_steps"){
+          if(!Array.isArray(params.steps)||!params.steps.length||params.steps.length>16
+            ||p.steps.some(s=>s.status==="done"))throw Error("Cannot replace completed checklist.");
+          const steps=params.steps.map((x:string,i:number)=>({id:i+1,title:String(x).slice(0,110),
+            status:(i===0?"active":"pending") as "active"|"pending"}));
+          saveProgress({...p,steps,stage:"running",visible:true},ctx);
+        }
+        const current=implementationProgress!;
+        if(current.stage==="complete")cleanPlanMirror(trackedSessionId);
+        return {content:[{type:"text",text:progressLines(current,24).join("\n")}],
+          details:current};
+      }catch(e){return {isError:true,content:[{type:"text",text:String(e)}]};}
+    },
+  });
 
   const health = new ModelHealth();
 
@@ -965,7 +1056,11 @@ export default function (pi: ExtensionAPI) {
     planRunActive = false;
     pendingPlanText = undefined;
     const branch = ctx.sessionManager?.getBranch?.() ?? [];
+    trackedSessionId = ctx.sessionManager?.getSessionId?.();
+    try{pruneOldPlanMirrors();}catch{ /* no writes to cwd on cache failure */ }
+    progressToolInjected = false;
     planDocument = latestPlanFromBranch(branch);
+    implementationProgress = latestProgress(branch);
     planOriginalRequest = planDocument?.request;
     const savedUi = [...branch].reverse().find((e: any) =>
       e?.type === "custom" && e.customType === PLAN_UI_ENTRY);
@@ -988,6 +1083,7 @@ export default function (pi: ExtensionAPI) {
     }
     const config = readConfig();
     showPlanSummary(ctx, workflowTask === "plan" && planSummaryVisible, false);
+    showProgress(ctx);
     if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
       workflowTask ? `Jev ${workflowTask.toUpperCase()}${isStrictPhase(workflowTask) ? " · READ ONLY" : ""}` : undefined);
     updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
@@ -1012,6 +1108,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("agent_start", (_event, ctx) => {
+    if (workflowTask === "implement" && implementationProgress?.stage === "paused")
+      saveProgress({...implementationProgress,stage:"running",visible:true},ctx);
+    if (workflowTask === "implement" && planDocument?.status==="approved") {
+      try{savePlanMirror(trackedSessionId,planDocument.markdown);}
+      catch{ /* canonical plan remains in the Pi session */ }
+    }
     planRunActive = workflowTask === "plan";
     pendingPlanText = undefined;
     const config = readConfig();
@@ -1040,6 +1142,10 @@ export default function (pi: ExtensionAPI) {
     if (workflowTask === "implement") {
       implementationHandoffPending = false;
       showPlanSummary(ctx, false);
+      if (implementationProgress && implementationProgress.stage==="running")
+        saveProgress({...implementationProgress,stage:"paused"},ctx);
+      cleanPlanMirror(trackedSessionId);
+      showProgress(ctx);
     }
     if (!planRunActive) return;
     planRunActive = false;
@@ -1053,6 +1159,9 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_shutdown", () => {
     robotView = undefined;
     robotAnimator?.stop();
+    // Reload and exit never leave a temporary .md file in the project.
+    cleanPlanMirror(trackedSessionId);
+    trackedSessionId = undefined;
   });
 
   // Track real provider outcomes instead of trusting the static Pi catalog.
@@ -1080,8 +1189,9 @@ export default function (pi: ExtensionAPI) {
     let instructions = instructionsForTask(workflowTask) + "\n\n" +
       skillGuidance(workflowTask, skills);
     if (workflowTask === "plan") {
-      instructions += "\n\nPLAN DOCUMENT REQUIREMENT: On finishing the research, output a complete self-contained Markdown implementation plan. Include Goal, Evidence & assumptions, Decisions & tradeoffs, Numbered steps, Files to touch, Validation, Risks and Acceptance criteria. Do not implement it. Jev will save the final answer and ask the user whether to review, refine, keep or implement.";
+      instructions += "\n\nPLAN DOCUMENT STORAGE: Do not create any plan.md, plan-*.md or planning scratch files in the project working directory. Return the final Markdown as your answer; Jev saves it inside the Pi session and mirrors it outside the project. Include actionable numbered steps or Markdown checkboxes for implementation progress.\n\nPLAN DOCUMENT REQUIREMENT: On finishing the research, output a complete self-contained Markdown implementation plan. Include Goal, Evidence & assumptions, Decisions & tradeoffs, Numbered steps, Files to touch, Validation, Risks and Acceptance criteria. Do not implement it. Jev will save the final answer and ask the user whether to review, refine, keep or implement.";
     } else if (workflowTask === "implement" && planDocument?.status === "approved") {
+      instructions += "\n\nIMPLEMENTATION PROGRESS: The active checklist belongs to this Pi session. Call jev_progress(action=list) to see step IDs; call jev_progress(action=update,stepId=N,status=active) before working on a step, status=done only after verifying that step with a short factual note, or status=blocked with the reason. Never mark steps done automatically or without evidence. The TUI updates from these calls; do not merely report progress in prose. Do not write auxiliary plan Markdown files inside the working repository; the approved plan is managed outside the project. Only write actual user-requested deliverables.\n";
       instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Do not produce another plan, planning document, review or outline instead of performing the final work.";
       if (implementationHandoffPending) {
         instructions += "\n\nCRITICAL APPROVAL HANDOFF: User selected IMPLEMENT NOW. Execute the approved deliverables immediately. For blog/content projects, WRITE THE FINAL ARTICLE; for code projects, IMPLEMENT CHANGES. Do NOT update/rewrite the plan artifact and do not return a plan again. Use allowed tools to complete the actual deliverable.";
@@ -1400,6 +1510,34 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("jev-progress", {
+    description:"Inspect current implementation step statuses and verification notes",
+    handler:async (_args,ctx)=>{
+      const p=implementationProgress;
+      if(!p){ctx.ui.notify("No Jev implementation checklist in this session.","info");return;}
+      if(ctx.hasUI && ctx.ui.select){
+        const entries=p.steps.map(s=>(s.status==="done"?"☑":s.status==="active"?"◉":s.status==="blocked"?"!":"☐")+" "+s.id+". "+s.title.slice(0,85));
+        const choice=await ctx.ui.select("Jev implementation · "+p.stage,[
+          ...entries,"Dismiss checklist (keep history)","Back",
+        ]);
+        if(choice==="Dismiss checklist (keep history)") {
+          saveProgress({...p,visible:false},ctx);
+          return;
+        }
+        const i=entries.indexOf(choice??"");
+        if(i>=0)ctx.ui.notify(p.steps[i].title+" · "+p.steps[i].status+
+          (p.steps[i].note?" · "+p.steps[i].note:""),"info");
+      }else ctx.ui.notify(progressLines(p,24).join("\n"),"info");
+    },
+  });
+  pi.registerCommand("jev-progress-clear", {
+    description:"End and hide Jev checklist, remove temporary plan mirror, keep session history",
+    handler:async (_args,ctx)=>{
+      closeProgress(ctx);
+      ctx.ui.notify("Checklist dismissed and temporary plan cache cleaned. Session history remains.","info");
+    },
+  });
+
   pi.registerCommand("jev-plan-open", {
     description: "Review, edit or approve the latest saved Jev plan and choose what happens next",
     handler: async (_args, ctx) => { await openPlan(ctx); },
@@ -1408,6 +1546,7 @@ export default function (pi: ExtensionAPI) {
     description: "Dismiss the plan summary widget; the saved plan is retained in this session",
     handler: async (_args, ctx) => {
       showPlanSummary(ctx, false);
+      cleanPlanMirror(trackedSessionId);
       ctx.ui.notify("Plan widget hidden. Use /jev-plan-open to review the saved plan again.", "info");
     },
   });
@@ -1419,6 +1558,7 @@ export default function (pi: ExtensionAPI) {
       changeWorkflow(undefined);
       implementationHandoffPending = false;
       showPlanSummary(ctx, false);
+      closeProgress(ctx);
       pi.appendEntry(WORKFLOW_ENTRY, { task: null });
       if (ctx.hasUI) ctx.ui.setStatus("jev-workflow", undefined);
       ctx.ui.notify("Jev AUTO mode restored; explicit task intent cleared and original tools restored.", "info");

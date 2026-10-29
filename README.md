@@ -259,6 +259,43 @@ Jevling stays the **original robot**, not the duck. While an agent is running, i
 
 Use `/jev-mascot` → **Robot animation: ON/OFF**, or `/jev-config` → **Robot animation**. Motion defaults to ON; Compact and Off mascot styles remain static.
 
+## Live Implementation Checklist & Clean Plan Storage (v0.8.0)
+
+### A checklist that tracks actual implementation work
+
+After `/jev-plan` finishes, choose **Implement now**. Jev extracts up to 12 numbered or checkbox tasks from the approved Markdown and displays a dedicated **TUI checklist above the editor**, independent of the robot:
+
+```text
+JEV IMPLEMENT · 2/4 · RUNNING
+☑ 1. Research current APIs
+☑ 2. Implement Gutenberg block
+◉ 3. Test Stripe and error handling
+☐ 4. Review and document changes
+/jev-progress · details | /jev-progress-clear · dismiss
+```
+
+The progress widget distinguishes **☑ verified**, **◉ current**, **☐ pending**, and **! blocked**. If the plan has no extractable steps it begins with one generic task; the agent can replace the list with precise steps before anything is marked done.
+
+A new model-callable `jev_progress` tool updates the checklist during Implementation. The agent should call it before working on a new step and after verifying a completed step, supplying a factual completion note. **Jev never guesses completion from tool activity or the final assistant message.** If the agent stops with unfinished steps, the widget says **PAUSED**, preserving the current step across follow-ups and `/reload`. If the model fails to call the tool, the checklist will not progress automatically.
+
+- `/jev-progress` — inspect all steps and their verification notes or hide the widget.
+- `/jev-progress-clear` — stop/dismiss tracking and clean the temporary plan file.
+- `/jev-auto` — exit explicit workflow, dismiss checklist, clean temporary plan data.
+
+When all steps are verified, Jev closes the checklist automatically but keeps the session progress history.
+
+### Plan Markdown lives outside the project
+
+The **canonical plan is saved in Pi's existing session JSONL**, not inside the source repository. When an auxiliary physical Markdown file is needed, Jev creates an ephemeral mirror in:
+
+```text
+~/.pi/agent/jev-model-manager/plans/<session-hash>.md
+```
+
+The location respects `PI_CODING_AGENT_DIR`. Each file is privately permissioned (0600) and named using a hash of the session ID; never `ctx.cwd`. Jev deletes **only its own temporary mirror** when implementation settles, completes, the user cancels/keeps the plan for later, exits the workflow, or closes/reloads the Pi session. On later continuation the file can be regenerated from the session plan. Stale mirrors from crashes are pruned on startup after 24 hours.
+
+Planning instructions now explicitly tell the agent **not to write any auxiliary plan.md/plan-*.md file into the repository**. Existing files a previous agent wrote into the project are not silently deleted, because they may contain user data. Review them and remove them manually if unwanted. A third-party extension or model tool could still write files on its own; Jev's plan-mode tool guard and explicit instructions limit, but cannot prevent, every possible external write.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.
