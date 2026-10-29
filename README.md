@@ -5,10 +5,10 @@
 A reference Pi extension for automatic model choice via TypeSafe Jev with a native management UI.
 
 ## Features
-- A native virtual model: `jev-manager/auto`, selectable from `/model`.
+- A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
-- `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, and `/jev-mascot` for live health and TUI display controls.
+- `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, `/jev-on`, and `/jev-mascot` for routing, health and TUI display controls.
 - `/jev-scan` to discover models from a 9Router OpenAI-compatible API and import **selected** model IDs.
 - Native `/jev-models` menu contains **9Router settings** and **Scan 9Router models**.
 - Imported 9Router models become physical Pi models under `jev-9router/<original-model-id>` (e.g. `jev-9router/cc/claude-opus-...`), available immediately without overwriting an existing `9router` provider.
@@ -102,6 +102,28 @@ In Pi, run `/jev-mascot` or choose **TUI mascot** in `/jev-config` to select:
 - **Off:** hides the widget entirely.
 
 The preference is saved in `jev-model-manager.json` and survives restarts. Jevling requires Pi **TUI mode**; it does not render in RPC, JSON or print mode. It is static (no animation, timers, network calls, model tokens or extra prompts) and has its own namespaced widget key.
+
+## Activate routing in your Pi session (v0.5.2)
+
+**Important:** Loading this extension, configuring keys, enabling Routing in the settings, or seeing the Jevling mascot **does not automatically route Pi requests**. Pi will continue using its selected physical/default model until the virtual model is selected.
+
+The easiest activation workflow inside Pi is:
+
+```text
+/jev-config     # configure credentials, models and task rules
+/jev-on         # enable auto mode and select jev-manager/auto in THIS Pi session
+/jev-status     # must report "Jev routing ACTIVE" and "Pi selected model: jev-manager/auto"
+```
+
+Alternatively, use `/model` to select `jev-manager/auto` manually and ensure **Routing = ON**, **Mode = auto** in `/jev-config`. If the selected model remains a provider model (such as `anthropic/...` or `jev-9router/...`), Jev task routing is **INACTIVE** even if the saved routing flag is ON.
+
+`/jev-on` validates that at least one enabled/authenticated physical model is eligible, then uses Pi's supported `pi.setModel()` API to select the virtual model without overwriting Pi's global default. It is intentionally **not automatically activated** on every session: a user's manual model selection or an explicitly launched model should be respected. Resuming a session where the virtual model was selected restores it through Pi session history.
+
+Jevling now reports **STANDBY / Inactive · run /jev-on** when the extension is loaded but Pi has selected a physical model, instead of misleadingly showing READY. `/jev-status` shows **ACTIVE/INACTIVE**, the selected Pi model, eligible candidate count and last routing decision.
+
+**Content creation:** `/jev-tasks` now includes **Writing & Content**, in addition to Planning, Implementation, Debugging, Code Review, Research and Explanation. This covers prompts such as `Plan gen một bài blog nói về lỗi PHP vừa rồi`. Jev classifies the task before routing; when a task category is uncertain, the standard confidence/fallback policy still applies.
+
+If `/jev-on` reports no eligible models, import or enable models using `/jev-scan` or `/jev-models`. If your Pi build cannot programmatically select the virtual model, use `/model` directly.
 
 ## How to use
 

@@ -132,9 +132,25 @@ function saveConfig(config: Config): void {
  * Jevling lives in a namespaced widget, never replacing Pi's own header/footer.
  * TUI only: RPC, print and JSON executions remain unaffected.
  */
+function isJevSelected(model: { provider: string; id: string } | undefined): boolean {
+  return model?.provider === ROUTER_PROVIDER && model.id === ROUTER_ID;
+}
+
+function isRoutingActive(config: Config, ctx: ExtensionContext): boolean {
+  return config.enabled && config.mode === "auto" && isJevSelected(ctx.model);
+}
+
 function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStatus): void {
   if (ctx.mode !== "tui") return;
-  const lines = mascotLines(config.mascot, status);
+  const display: MascotStatus = isRoutingActive(config, ctx) ? status : {
+    mood: "disabled",
+    subtitle: config.enabled
+      ? config.mode === "observe" && isJevSelected(ctx.model)
+        ? "Observe only · /jev-on to route"
+        : "Inactive · run /jev-on"
+      : "Routing off · run /jev-on",
+  };
+  const lines = mascotLines(config.mascot, display);
   ctx.ui.setWidget(MASCOT_WIDGET_KEY, lines.length ? lines : undefined);
 }
 
@@ -205,14 +221,15 @@ async function choose(
       questions: {
         task: {
           type: "choice",
-          instructions: "Classify the primary software engineering task in the user's prompt.",
+          instructions: "Classify the main user task, including software development and content creation.",
           criteria: {
-            plan: "Design, architecture, investigation, or tradeoffs",
+            plan: "Plan an architecture, project, workflow or content outline",
             implement: "Write or change application code",
             debug: "Diagnose and fix a defect",
             review: "Review existing code, tests, or security",
             research: "Investigate unfamiliar APIs, concepts, or libraries",
             explain: "Explain a concept without editing code",
+            write: "Create or draft a blog post, article, tutorial, documentation or marketing content",
           },
         },
         selected_model: {
@@ -401,7 +418,11 @@ async function configureRoutingOptions(ctx: ExtensionContext, config: Config): P
       "Back",
     ]);
     if (!choice || choice === "Back") return;
-    if (choice.startsWith("Enabled:")) config.enabled = !config.enabled;
+    if (choice.startsWith("Enabled:")) {
+      config.enabled = !config.enabled;
+      if (config.enabled && !isJevSelected(ctx.model))
+        ctx.ui.notify("Routing policy enabled, but Pi still uses a physical model. Run /jev-on to activate.", "info");
+    }
     else if (choice.startsWith("Mode:")) config.mode = config.mode === "auto" ? "observe" : "auto";
     else if (choice.startsWith("Minimum confidence:")) {
       const raw = await ctx.ui.input("Minimum Jev confidence (0–1)", String(config.minProbability));
@@ -426,6 +447,43 @@ async function configureRoutingOptions(ctx: ExtensionContext, config: Config): P
 }
 
 
+
+/** Explicit opt-in: enable routing and activate the virtual model for this Pi session. */
+async function activateJev(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
+  const config = readConfig();
+  const available = physicalCandidates(config, ctx);
+  if (!available.length) {
+    ctx.ui.notify("Jev cannot activate: no enabled/authenticated models. Add them with /jev-models or /jev-scan.", "warning");
+    return false;
+  }
+  if (typeof pi.setModel !== "function") {
+    ctx.ui.notify("This Pi build does not expose pi.setModel(). Select jev-manager/auto manually with /model.", "warning");
+    return false;
+  }
+  const virtual = ctx.modelRegistry.find(ROUTER_PROVIDER, ROUTER_ID)
+    ?? ctx.modelRegistry.getAvailable().find(m => m.provider === ROUTER_PROVIDER && m.id === ROUTER_ID);
+  if (!virtual) {
+    ctx.ui.notify("Jev virtual model is missing. Run /reload, then use /model → jev-manager/auto.", "warning");
+    return false;
+  }
+  try {
+    const success = await pi.setModel(virtual);
+    if (!success) {
+      ctx.ui.notify("Pi refused the virtual model selection. Verify credentials, or select jev-manager/auto with /model.", "error");
+      return false;
+    }
+    config.enabled = true;
+    config.mode = "auto";
+    saveConfig(config);
+    // The model_select event may fire before we save routing=ON.
+    updateJevling({ ...ctx, model: virtual }, config, { mood: "ready" });
+    ctx.ui.notify("Jev routing ACTIVE. Pi is now using jev-manager/auto for this session.", "info");
+    return true;
+  } catch {
+    ctx.ui.notify("Unable to switch model. Use /model to select jev-manager/auto and inspect /jev-status.", "error");
+    return false;
+  }
+}
 
 async function probeModelHealth(ctx: ExtensionContext, config: Config, health: ModelHealth): Promise<void> {
   const available = new Set(ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`));
@@ -531,6 +589,9 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       `9Router key: ${status9}`,
       `9Router key variable: ${config.nineRouter.apiKeyEnv}`,
       `Jev key: ${statusJev}`,
+      `Current selection: ${isJevSelected(ctx.model) ? "jev-manager/auto" : ctx.model ? keyOf(ctx.model) : "unknown"}`,
+      `Routing active: ${isRoutingActive(config, ctx) ? "YES" : "NO"}`,
+      "Activate routing for this session (/jev-on)",
       "Routing & classifier options",
       "Task routing (/jev-tasks)",
       `TUI mascot: ${config.mascot}`,
@@ -590,6 +651,11 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       } else if (choice.startsWith("Subagent auto-routing:")) {
         config.subagentRouting = !config.subagentRouting;
         saveConfig(config);
+      } else if (choice === "Activate routing for this session (/jev-on)" || choice.startsWith("Routing active:")) {
+        await activateJev(pi, ctx);
+        Object.assign(config, readConfig());
+      } else if (choice.startsWith("Current selection:")) {
+        ctx.ui.notify("Select /jev-on to activate task-aware routing; otherwise Pi uses the current model directly.", "info");
       } else if (choice === "Routing & classifier options") {
         await configureRoutingOptions(ctx, config);
         syncJevCredentials(pi, config);
@@ -742,6 +808,16 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", (_event, ctx) => {
     const config = readConfig();
     updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
+    // Do not hijack sessions that intentionally selected a physical model.
+    if (ctx.mode === "tui" && config.enabled && !isJevSelected(ctx.model)) {
+      ctx.ui.notify("Jev is configured but INACTIVE: Pi is using a physical model. Run /jev-on to activate routing.", "info");
+    }
+  });
+  pi.on?.("model_select", (event, ctx) => {
+    const config = readConfig();
+    updateJevling({ ...ctx, model: event.model }, config, {
+      mood: config.enabled ? "ready" : "disabled",
+    });
   });
   // Mark the character ready at the end of a turn, retaining the last routed model.
   pi.on?.("agent_end", (_event, ctx) => {
@@ -905,7 +981,11 @@ export default function (pi: ExtensionAPI) {
           ...names, "Done",
         ]);
         if (!choice || choice === "Done") break;
-        if (choice.startsWith("Routing:")) config.enabled = !config.enabled;
+        if (choice.startsWith("Routing:")) {
+          config.enabled = !config.enabled;
+          if (config.enabled && !isJevSelected(ctx.model))
+            ctx.ui.notify("Routing policy enabled, but Pi still uses a physical model. Run /jev-on to activate.", "info");
+        }
         else if (choice.startsWith("Mode:")) config.mode = config.mode === "auto" ? "observe" : "auto";
         else if (choice.startsWith("Fallback:")) {
           const item = await ctx.ui.select("Select fallback", config.models.filter((m) => m.enabled).map((m) => m.key));
@@ -1009,14 +1089,21 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("jev-on", {
+    description: "Enable and activate Jev virtual routing for the current Pi session",
+    handler: async (_args, ctx) => { await activateJev(pi, ctx); },
+  });
+
   pi.registerCommand("jev-status", {
     description: "Show routing status and latest Jev selection",
     handler: async (_args, ctx) => {
       const config = readConfig();
       const d = lastDecision;
       ctx.ui.notify(
-        `Jev ${config.enabled ? "enabled" : "disabled"} (${config.mode}), ` +
-        `${config.models.length} models, cooldown=${health.list(config.models.map(m => m.key)).filter(s => s.status === "cooldown").length}, fallback=${config.fallback || "unset"}` +
+        `Jev routing ${isRoutingActive(config, ctx) ? "ACTIVE" : "INACTIVE"} · configured ${config.enabled ? "ON" : "OFF"} · mode ${config.mode}` +
+        `\nPi selected model: ${ctx.model ? keyOf(ctx.model) : "unknown"}` +
+        `\nEligible models: ${physicalCandidates(config, ctx).length}/${config.models.filter(m => m.enabled).length} · cooldown=${health.list(config.models.map(m => m.key)).filter(s => s.status === "cooldown").length} · fallback=${config.fallback || "unset"}` +
+        (isRoutingActive(config, ctx) ? "" : "\nTo activate routing now: /jev-on") +
         (d ? `\nLast: ${d.task} → ${d.model}, p=${d.probability.toFixed(2)} (${d.reason})` : ""),
         "info",
       );

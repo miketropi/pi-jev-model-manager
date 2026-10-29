@@ -8,6 +8,7 @@ export interface MascotStatus {
   mood: MascotMood;
   task?: string;
   model?: string;
+  subtitle?: string;
 }
 export const MASCOT_WIDGET_KEY = "jev-manager:mascot";
 
@@ -33,8 +34,8 @@ export function mascotLines(style: MascotStyle, status: MascotStatus): string[] 
     : status.mood === "routing" ? "◆" : "●";
   const task = cleanMascotText(status.task, 20);
   const model = cleanMascotText(status.model, 36);
-  const subtitle = model ? `${task ? task + " · " : ""}${model}`
-    : status.mood === "disabled" ? "Routing off · /jev-config" : "Smart model routing · /jev-config";
+  const subtitle = status.subtitle || (model ? `${task ? task + " · " : ""}${model}`
+    : status.mood === "disabled" ? "Routing off · /jev-on" : "Smart model routing · /jev-config");
   if (style === "compact") return [`◇ JEV ${marker} ${label.toLowerCase()} · ${subtitle}`];
   return [
     `  ╭─◇─╮   JEV  ${marker} ${label}`,

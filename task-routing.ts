@@ -1,5 +1,5 @@
 /** Task-aware routing policy; Pi-free for offline testing and subagent adapters. */
-export const TASK_TYPES = ["plan", "implement", "debug", "review", "research", "explain"] as const;
+export const TASK_TYPES = ["plan", "implement", "debug", "review", "research", "explain", "write"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export type TaskMode = "auto" | "prefer" | "force";
 export interface TaskRule { mode: TaskMode; model?: string; }
@@ -70,6 +70,7 @@ export function subagentTaskType(input: Record<string, unknown>): TaskType | und
     implementer: "implement", coder: "implement", debugger: "debug", fixer: "debug",
     reviewer: "review", verifier: "review", auditor: "review", researcher: "research",
     scout: "research", searcher: "research", explainer: "explain",
+    writer: "write", author: "write", blogger: "write", copywriter: "write", contentwriter: "write",
   };
   return aliases[a];
 }
