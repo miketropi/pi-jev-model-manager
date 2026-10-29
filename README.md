@@ -441,6 +441,53 @@ If Pi cannot select the virtual model (missing provider/credentials or incompati
 
 The normal `/jev-auto` and manual physical-model selections remain respected in unrelated Pi sessions; the new activation applies to the new child created by an approved Jev plan. No user interaction is required during a successful new-session handoff. Regression tests cover child startup on a physical model and in observe mode, plus fail-closed behavior when Pi rejects `setModel()`.
 
+## Subagent-First Implementation (v0.10.0)
+
+Jev now defaults to **Prefer Subagents**, with at most **2 concurrent Builders**. The main Implementation Session is the **Lead / Orchestrator**; Jev reuses Pi's native `subagent` extension instead of creating its own process-spawning engine. Every Builder launched by Pi has an independent agent context. The Lead keeps the canonical approved plan and checklist.
+
+### Required Pi subagent setup
+
+**The native `subagent` extension is optional and is not bundled by Jev.** Install/enable the official Pi example from [Pi's subagent extension](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/subagent) following its upstream README. Ensure a user-level agent profile named `worker` exists at `~/.pi/agent/agents/worker.md`, or select a different installed user-level agent in `/jev-config`. Pi's subagent extension uses user-level agents by default; Jev explicitly sends `agentScope: "user"` to avoid loading untrusted project-local agent definitions. The worker profile controls its model and tools.
+
+Use `/reload` after installing the Pi subagent extension. Run `/jev-delegation` to verify that the native tool is available. If missing, Jev will report **NO Builder was spawned** and the Lead can complete the task directly; it will never pretend to have delegated work. Native execution is only available on Pi builds supporting nested tool invocation via `ctx.executeTool`.
+
+### Configuration
+
+In `/jev-config` select Implementation execution strategy, Max concurrent Builders and Builder agent profile:
+
+- **Prefer Subagents** (default): delegate medium/large scoped tasks; small edits stay with Lead
+- **Always Delegate**: prefer delegation even for small scoped tasks
+- **Direct**: Lead implements without spawning
+- **Max concurrent Builders**: 1 or 2 (default 2)
+- **Builder agent profile**: user-level Pi agent name (default `worker`)
+
+The settings are saved under `delegation` in Jev's global config and are separate from the older optional `subagentRouting` switch (which only routes models for certain third-party spawn tools).
+
+### Actual delegation workflow
+
+```text
+APPROVED PLAN → Implementation Session (Lead)
+    │
+    ├─ jev_progress(action=list)                    # real checklist IDs
+    ├─ jev_delegate(action=plan, tasks=[...])       # files + dependencies + effort
+    │       ├─ small/unscoped task → Lead
+    │       └─ medium/large scoped task → Builder
+    ├─ jev_delegate(action=run)                     # real Pi native subagent call
+    │       ├─ Builder A (isolated context)
+    │       └─ Builder B (isolated context, disjoint files only)
+    ├─ Lead inspects diff + tests                   # mandatory verification
+    ├─ jev_progress(action=update, status=done, note="...")
+    └─ next verified-ready wave → ... → optional Auto QA → Review
+```
+
+Jev's `jev_delegate` tool invokes the native Pi tool through `ctx.executeTool("subagent", ...)`. Execution can be a single Builder or a parallel batch of at most two. The scheduler rejects invalid paths, duplicate step IDs, unresolved dependencies and cycles; it serializes overlapping directories and unknown file scopes. A running wave is recorded in the Pi session (including an abbreviated result), and **cannot be retried silently**. A later wave cannot launch until previous dependencies have been marked done with verification by Lead. Parent `jev_progress` rejects marking a delegated step done if the subagent tool did not return a non-error result. Even a non-error response **does not automatically mark anything done**.
+
+Use `/jev-delegation` to inspect strategy, native tool availability and scheduled waves. The normal `/jev-pipeline-status` and `/jev-pipeline-resume` remain valid for Auto QA/Review. Restarting a completed implementation clears the old delegation record.
+
+**Isolation limits:** Each Pi Builder gets its own conversation context, but children still share the same repository working tree. The file scopes in task prompts are policy instructions, **not filesystem sandbox permissions**; subagents could modify files outside the declared scope. Always review the git diff and test results. For strong write isolation use separate Git worktrees. Pi may impose additional limits on concurrency and model availability. A spawned process may also consume extra tokens; Jev mainly reduces the Lead's context pressure rather than guaranteeing cost savings.
+
+**Verification:** The Jev nested-tool workflow is tested using a Pi runtime mock with a real tool-call interface, but actual provider-backed Pi subprocess spawning on your machine has not been tested yet.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.

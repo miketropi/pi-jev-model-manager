@@ -16,6 +16,11 @@ import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle,
 import { RobotMotion } from "./robot-motion.ts";
 import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestProgress, progressLines, type Progress } from "./progress.ts";
 import { savePlanMirror, cleanPlanMirror, pruneOldPlanMirrors } from "./plan-cache.ts";
+import { DELEGATION_ENTRY, DEFAULT_DELEGATION, normalizeDelegation,
+  createDelegationSchedule, latestDelegation, subagentReady, scheduleInstructions,
+  nextDelegationWave, recordDelegationRun, delegatePrompt,
+  type DelegationSettings, type DelegationSchedule,
+  type ProposedTask } from "./delegation.ts";
 import { SESSION_ORIGIN_ENTRY, SESSION_LAUNCH_ENTRY, createOrigin,
   latestSessionOrigin, latestSessionLaunch, handoffTitle, type HandoffMode } from "./implementation-session.ts";
 import { PIPELINE_ENTRY, startPipeline, advancePipeline, latestPipelineFromBranch,
@@ -80,6 +85,7 @@ interface Config {
   models: ManagedModel[];
   taskRules: TaskRules;
   subagentRouting: boolean;
+  delegation: DelegationSettings;
   health: HealthSettings;
   mascot: MascotStyle;
   robotMotion: boolean;
@@ -106,7 +112,8 @@ const defaults = (): Config => ({
   nineRouter: { baseUrl: DEFAULT_NINE_ROUTER_URL, apiKeyEnv: DEFAULT_NINE_ROUTER_KEY_ENV },
   models: [],
   taskRules: defaultTaskRules(),
-  subagentRouting: false, // explicit opt-in: do not rewrite external spawn tools by default
+  subagentRouting: false, // external third-party model override remains opt-in
+  delegation: { ...DEFAULT_DELEGATION },
   health: { ...DEFAULT_HEALTH },
   mascot: "mascot",
   robotMotion: true,
@@ -125,6 +132,7 @@ function readConfig(): Config {
       models: Array.isArray(raw.models) ? raw.models.filter((m) => typeof m?.key === "string") : [],
       taskRules: normalizeTaskRules(raw.taskRules),
       subagentRouting: raw.subagentRouting === true,
+      delegation: normalizeDelegation(raw.delegation),
       health: normalizeHealthSettings(raw.health),
       mascot: normalizeMascotStyle(raw.mascot),
       robotMotion: raw.robotMotion !== false,
@@ -627,6 +635,9 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       `Robot animation: ${config.robotMotion ? "ON" : "OFF"}`,
       "Model health & failover (/jev-health)",
       `Subagent auto-routing: ${config.subagentRouting ? "ON" : "OFF"}`,
+      `Implementation execution: ${config.delegation.strategy}`,
+      `Max concurrent Builders: ${config.delegation.maxConcurrentBuilders}`,
+      `Builder agent profile: ${config.delegation.builderAgent}`,
       "Test 9Router connection",
       "Manage models (/jev-models)",
       "Done",
@@ -685,6 +696,28 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       } else if (choice.startsWith("Subagent auto-routing:")) {
         config.subagentRouting = !config.subagentRouting;
         saveConfig(config);
+      } else if (choice.startsWith("Implementation execution:")) {
+        const next=await ctx.ui.select("Implementation Execution Strategy",[
+          "Prefer Subagents (recommended)","Always Delegate","Direct · Lead only"]);
+        if(next){
+          config.delegation.strategy=next.startsWith("Prefer")?"prefer":
+            next.startsWith("Always")?"always":"direct";
+          saveConfig(config);
+        }
+      } else if (choice.startsWith("Max concurrent Builders:")) {
+        const next=await ctx.ui.select("Max concurrent Builders (file scopes must be disjoint)",["1","2"]);
+        if(next==="1"||next==="2"){
+          config.delegation.maxConcurrentBuilders=Number(next);
+          saveConfig(config);
+        }
+      } else if (choice.startsWith("Builder agent profile:")) {
+        const next=await ctx.ui.input("Pi subagent agent name (user-level only)",
+          config.delegation.builderAgent);
+        if(next!==undefined){
+          const valid=normalizeDelegation({...config.delegation,builderAgent:next});
+          if(valid.builderAgent!==next)ctx.ui.notify("Agent name must be alphanumeric, dash or underscore.", "warning");
+          else {config.delegation=valid;saveConfig(config);}
+        }
       } else if (choice === "Activate routing for this session (/jev-on)" || choice.startsWith("Routing active:")) {
         await activateJev(pi, ctx);
         Object.assign(config, readConfig());
@@ -854,6 +887,9 @@ export default function (pi: ExtensionAPI) {
   let implementationProgress: Progress | undefined;
   let trackedSessionId: string | undefined;
   let progressToolInjected = false;
+  let delegationToolInjected = false;
+  let nativeSubagentInjected = false;
+  let delegationSchedule: DelegationSchedule | undefined;
   let implementationOrigin: ReturnType<typeof latestSessionOrigin>;
   let autoPipeline: PipelineState | undefined;
   let pipelineGateInjected = false;
@@ -877,7 +913,15 @@ export default function (pi: ExtensionAPI) {
     const p = implementationProgress;
     const visible = workflowTask === "implement" && p?.visible
       && p.stage !== "complete" && p.stage !== "cancelled";
-    ctx.ui.setWidget(PROGRESS_WIDGET, visible ? progressLines(p!) : undefined);
+    const rows=visible ? progressLines(p!) : undefined;
+    if(rows && delegationSchedule?.version===p?.version){
+      for(let i=1;i<rows.length;i++){
+        const number=Number(/^.[ ]+(\d+)\./.exec(rows[i])?.[1]);
+        if(delegationSchedule.waves.some(w=>w.execution==="builder" &&
+          w.tasks.some(t=>t.stepId===number)))rows[i]+=" · Builder";
+      }
+    }
+    ctx.ui.setWidget(PROGRESS_WIDGET,rows);
   }
 
   function saveProgress(p: Progress, ctx: ExtensionContext): void {
@@ -1070,6 +1114,15 @@ export default function (pi: ExtensionAPI) {
 
 
   function changeWorkflow(task: TaskType | undefined): void {
+    if (workflowTask === "implement" && task !== "implement") {
+      const remove=[
+        ...(delegationToolInjected?["jev_delegate"]:[]),
+        ...(nativeSubagentInjected?["subagent"]:[])
+      ];
+      if(remove.length)pi.setActiveTools(pi.getActiveTools().filter(name=>!remove.includes(name)));
+      delegationToolInjected=false;
+      nativeSubagentInjected=false;
+    }
     if (pipelineGateInjected && task !== workflowTask) {
       pi.setActiveTools(pi.getActiveTools().filter(n=>n!=="jev_quality_gate"));
       pipelineGateInjected = false;
@@ -1106,9 +1159,11 @@ export default function (pi: ExtensionAPI) {
     changeWorkflow(task);
     if (task === "implement" && planDocument?.status === "approved") {
       if (!implementationProgress || implementationProgress.version !== planDocument.version
-        || ["cancelled","complete"].includes(implementationProgress.stage))
+        || ["cancelled","complete"].includes(implementationProgress.stage)) {
+        delegationSchedule=undefined;
+        pi.appendEntry(DELEGATION_ENTRY,{cleared:true});
         saveProgress(newProgress(planDocument.markdown,planDocument.version),ctx);
-      else saveProgress({...implementationProgress,stage:"running",visible:true},ctx);
+      } else saveProgress({...implementationProgress,stage:"running",visible:true},ctx);
     } else if (task !== "implement" && implementationProgress?.visible) {
       closeProgress(ctx);
     }
@@ -1123,6 +1178,14 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (task === "implement" && typeof pi.getAllTools === "function") {
+      const registeredNames=pi.getAllTools().map(t=>t.name);
+      const extras=["jev_delegate",...(readConfig().delegation.strategy==="direct"?[]:
+        registeredNames.includes("subagent")?["subagent"]:[])];
+      const newly=extras.filter(name=>registeredNames.includes(name)&&
+        !pi.getActiveTools().includes(name));
+      if(newly.length)pi.setActiveTools([...pi.getActiveTools(),...newly]);
+      delegationToolInjected=newly.includes("jev_delegate");
+      nativeSubagentInjected=newly.includes("subagent");
       const registered = pi.getAllTools().some(t=>t.name==="jev_progress");
       if (registered && !pi.getActiveTools().includes("jev_progress")) {
         pi.setActiveTools([...pi.getActiveTools(),"jev_progress"]);
@@ -1156,6 +1219,13 @@ export default function (pi: ExtensionAPI) {
         if(params.action==="update"){
           if(!Number.isInteger(params.stepId)||!["active","done","blocked"].includes(params.status))
             throw Error("Supply valid stepId and status.");
+          if(params.status==="done" && delegationSchedule?.version===p.version){
+            const waveIndex=delegationSchedule.waves.findIndex(w=>w.execution==="builder" &&
+              w.tasks.some(t=>t.stepId===params.stepId));
+            if(waveIndex>=0 && !delegationSchedule.runs?.some(r=>
+              r.wave===waveIndex && r.status==="reported"))
+              throw Error("Builder step has no successful subagent tool result. Run jev_delegate(action=run), inspect the result and verify tests before marking done.");
+          }
           saveProgress(changeProgress(p,params.stepId,params.status,params.note),ctx);
         } else if(params.action==="set_steps"){
           if(!Array.isArray(params.steps)||!params.steps.length||params.steps.length>16
@@ -1200,6 +1270,104 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name:"jev_delegate",label:"Jev · Delegate Implementation Tasks",
+    description:"Schedule approved checklist steps conservatively, then actually execute Builder waves using Pi's native subagent tool (isolated process). Lead must verify results before updating jev_progress. Actions: plan, run, status.",
+    defaultActive:false,
+    promptSnippet:"Use jev_delegate to plan independent scoped implementation tasks and run Builder waves. Lead verifies every wave before checking off steps.",
+    promptGuidelines:["Only in Jev IMPLEMENT: call jev_delegate(action=plan) with each checklist step, relative file ownership, dependencies and estimated effort. Call action=run to execute one verified-ready wave. Never declare a subagent successful without reviewing the tool result and running checks."],
+    parameters:{type:"object",required:["action"],additionalProperties:false,properties:{
+      action:{type:"string",enum:["plan","run","status"]},
+      tasks:{type:"array",maxItems:16,items:{type:"object",required:["stepId","files","dependsOn","effort"],
+        additionalProperties:false,properties:{
+          stepId:{type:"integer"},files:{type:"array",items:{type:"string"},maxItems:24},
+          dependsOn:{type:"array",items:{type:"integer"},maxItems:16},
+          effort:{type:"string",enum:["small","medium","large"]},
+        }}},
+    }} as any,
+    async execute(_id,params,signal,onUpdate,ctx){
+      if(workflowTask!=="implement" || !implementationProgress ||
+        !planDocument || planDocument.status!=="approved")
+        return {isError:true,content:[{type:"text",text:"jev_delegate requires an approved plan in Jev Implementation mode."}]};
+      const config=readConfig().delegation;
+      try {
+        if(params.action==="plan"){
+          if(!Array.isArray(params.tasks))throw Error("Supply tasks with step IDs, file scopes, dependencies and effort");
+          const schedule=createDelegationSchedule(implementationProgress,
+            params.tasks as ProposedTask[],config);
+          delegationSchedule=schedule;
+          pi.appendEntry(DELEGATION_ENTRY,schedule);
+          const toolNames=typeof pi.getAllTools==="function"
+            ?pi.getAllTools().map(t=>t.name):[];
+          const ready=subagentReady(toolNames)&&typeof (ctx as any).executeTool==="function";
+          return {content:[{type:"text",text:scheduleInstructions(schedule,planDocument.markdown)+
+            "\nNative Pi subagent: "+(ready?"AVAILABLE":"NOT AVAILABLE; direct Lead fallback only")+
+            "\nCall jev_delegate(action=run) to execute a Builder wave. Verify its results and mark checklist steps done before the next wave."}],
+            details:{schedule,nativeSubagentAvailable:ready}};
+        }
+        if(!delegationSchedule || delegationSchedule.version!==implementationProgress.version)
+          throw Error("Create a delegation schedule first (jev_delegate action=plan).");
+        const next=nextDelegationWave(delegationSchedule,implementationProgress);
+        if(params.action==="status"){
+          const text=next
+            ?scheduleInstructions({...delegationSchedule,waves:delegationSchedule.waves.slice(next.index)},
+              planDocument.markdown):"All scheduled waves are verified.";
+          return {content:[{type:"text",text}],details:delegationSchedule};
+        }
+        if(params.action!=="run")throw Error("Unknown delegation action");
+        if(!next)
+          return {content:[{type:"text",text:"All scheduled tasks have been verified by the Lead."}]};
+        const {index,wave}=next;
+        if(wave.execution==="lead"){
+          return {content:[{type:"text",text:"Wave "+(index+1)+
+            " is a direct Lead task. Do it in this session, verify it, then use jev_progress. "+
+            wave.tasks.map(t=>"#"+t.stepId+" "+t.title).join("; ")}],
+            details:{wave:index+1,execution:"lead"}};
+        }
+        const registered=typeof pi.getAllTools==="function"
+          && pi.getAllTools().some(t=>t.name==="subagent");
+        if(!registered || typeof (ctx as any).executeTool!=="function"){
+          return {isError:true,content:[{type:"text",
+            text:"Pi native subagent extension unavailable. NO Builder was spawned. "+
+            "Install/enable Pi's official subagent extension with a user-level "+
+            config.builderAgent+" agent profile, then /reload; or implement the wave "+
+            "directly in Lead and verify each step. Never claim delegation happened."}]};
+        }
+        const tasks=wave.tasks.map(t=>({
+          agent:delegationSchedule!.builderAgent,
+          task:delegatePrompt(t,planDocument!.markdown),
+        }));
+        // Only one wave at a time. Scheduler enforces <=2 non-overlapping
+        // file scopes; nested tool calls use Pi's tool validator / abort signal.
+        const call=tasks.length===1?{...tasks[0],agentScope:"user"}:
+          {tasks,agentScope:"user"};
+        if(ctx.hasUI)ctx.ui.setStatus("jev-builders",
+          "Jev BUILDERS · "+tasks.length+" running · wave "+(index+1));
+        let result:any;
+        try {
+          result=await (ctx as any).executeTool("subagent",call,{signal,onUpdate});
+        } finally {
+          if(ctx.hasUI)ctx.ui.setStatus("jev-builders",undefined);
+        }
+        const content=Array.isArray(result?.content)?result.content.filter(
+          (c:any)=>c.type==="text").map((c:any)=>String(c.text)).join("\n"):"";
+        const failed=result?.isError===true || !Array.isArray(result?.content)
+          || !content.trim();
+        const status=failed?"error":"reported";
+        delegationSchedule=recordDelegationRun(delegationSchedule,index,status,content||"No text returned");
+        pi.appendEntry(DELEGATION_ENTRY,delegationSchedule);
+        const summary="Builder wave "+(index+1)+" "+status+
+          " · "+wave.tasks.map(t=>"#"+t.stepId).join(", ")+
+          "\nLEAD MUST inspect changed files and tests. Do not mark checklist done on the basis of a successful process exit alone.\n";
+        return {isError:failed,
+          content:[{type:"text",text:summary+(content||"Subagent returned no text.").slice(0,36000)}],
+          details:{wave:index+1,status,delegation:delegationSchedule,subagent:result?.details}};
+      }catch(e){
+        return {isError:true,content:[{type:"text",text:e instanceof Error?e.message:String(e)}]};
+      }
+    }
+  });
+
   const health = new ModelHealth();
 
   pi.on?.("session_start", async (event, ctx) => {
@@ -1214,6 +1382,9 @@ export default function (pi: ExtensionAPI) {
     progressToolInjected = false;
     planDocument = latestPlanFromBranch(branch);
     implementationProgress = latestProgress(branch);
+    delegationSchedule = latestDelegation(branch);
+    if(delegationSchedule?.version!==implementationProgress?.version)
+      delegationSchedule=undefined;
     implementationOrigin = latestSessionOrigin(branch);
     autoPipeline = latestPipelineFromBranch(branch);
     // The just-created child must start its approved pipeline. A later reload
@@ -1247,6 +1418,14 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if(workflowTask==="implement" && typeof pi.getAllTools==="function"){
+      const names=pi.getAllTools().map(t=>t.name);
+      const activeBefore=pi.getActiveTools();
+      const needs=["jev_delegate",...(readConfig().delegation.strategy==="direct"?[]:
+        names.includes("subagent")?["subagent"]:[])].filter(n=>
+        names.includes(n)&&!activeBefore.includes(n));
+      if(needs.length)pi.setActiveTools([...activeBefore,...needs]);
+      delegationToolInjected=needs.includes("jev_delegate");
+      nativeSubagentInjected=needs.includes("subagent");
       const active=pi.getActiveTools();
       if(pi.getAllTools().some(t=>t.name==="jev_progress") && !active.includes("jev_progress")){
         pi.setActiveTools([...active,"jev_progress"]);
@@ -1416,6 +1595,18 @@ export default function (pi: ExtensionAPI) {
     } else if (workflowTask === "implement" && planDocument?.status === "approved") {
       instructions += "\n\nIMPLEMENTATION PROGRESS: The active checklist belongs to this Pi session. Call jev_progress(action=list) to see step IDs; call jev_progress(action=update,stepId=N,status=active) before working on a step, status=done only after verifying that step with a short factual note, or status=blocked with the reason. Never mark steps done automatically or without evidence. The TUI updates from these calls; do not merely report progress in prose. Do not write auxiliary plan Markdown files inside the working repository; the approved plan is managed outside the project. Only write actual user-requested deliverables.\n";
       instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Do not produce another plan, planning document, review or outline instead of performing the final work.";
+      const delegation=readConfig().delegation;
+      const nativeAvailable=typeof pi.getAllTools==="function" &&
+        subagentReady(pi.getAllTools().map(t=>t.name));
+      if(delegation.strategy!=="direct"){
+        instructions += "\n\nJEV SUBAGENT-FIRST IMPLEMENTATION: You are the Lead / Orchestrator. BEFORE directly implementing substantial checklist steps, call jev_progress(action=list), inspect the affected files and then call jev_delegate(action=plan) with the remaining checklist step IDs, exact relative file or directory ownership scopes, dependencies and small/medium/large effort. Use jev_delegate(action=run) to actually spawn Pi native Builder subagents for each ready, independent wave (at most "+delegation.maxConcurrentBuilders+" Builders). The delegation tool calls native Pi subagent directly; do not call subagent directly, do not make up tool results. Small fixes may remain with Lead. Unknown or overlapping file scopes MUST run sequentially. After each Builder wave, inspect diff and run suitable tests, then only the Lead calls jev_progress(status=done, note=verified evidence). Never mark delegated steps done solely because subprocess exited. Proceed wave by wave; do not skip dependency checks or automatically retry a failed wave. QA/Review remain separate pipeline phases.";
+        if(!nativeAvailable)instructions += "\n\nNATIVE PI SUBAGENT NOT INSTALLED: Jev cannot spawn Builders; implement directly as Lead or tell the user how to enable the official Pi subagent extension. Never claim a Builder ran.";
+        if(delegationSchedule?.version===implementationProgress?.version)
+          instructions += "\n\nExisting delegation schedule in session: "+
+            scheduleInstructions(delegationSchedule,planDocument.markdown).slice(0,18000);
+      } else {
+        instructions += "\n\nJEV DIRECT EXECUTION: Lead implements all tasks. Do not spawn subagents.";
+      }
       if (implementationHandoffPending) {
         instructions += "\n\nCRITICAL APPROVAL HANDOFF: User selected IMPLEMENT NOW. Execute the approved deliverables immediately. For blog/content projects, WRITE THE FINAL ARTICLE; for code projects, IMPLEMENT CHANGES. Do NOT update/rewrite the plan artifact and do not return a plan again. Use allowed tools to complete the actual deliverable.";
       }
@@ -1553,6 +1744,11 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason: `Jev ${workflowTask} is read-only. Use /jev-implement or /jev-auto before modifying files or running commands.` };
     }
     const settings = readConfig();
+    // Jev owns concurrency and scope during Implementation. Direct subagent
+    // calls would bypass the scheduler; nested calls from jev_delegate are safe.
+    if(workflowTask==="implement" && event.toolName==="subagent" &&
+      !event.parentToolCallId && settings.delegation.strategy!=="direct")
+      return {block:true,reason:"Use jev_delegate(action=plan/run) so Pi Builder work is limited to two file-disjoint tasks and verified before the next wave."};
     if (!settings.enabled || !settings.subagentRouting || settings.mode !== "auto") return;
     if (!["Agent", "agent_spawn", "spawn_agent", "subagent_spawn"].includes(event.toolName)) return;
     const input = event.input as Record<string, unknown>;
@@ -1775,6 +1971,22 @@ export default function (pi: ExtensionAPI) {
           (error instanceof Error ? error.message : String(error)) +
           "\nCheck DNS, HTTPS_PROXY, firewall and TLS certificates.", "error");
       }
+    },
+  });
+
+  pi.registerCommand("jev-delegation", {
+    description:"Inspect Jev Implementation task delegation strategy and native subagent availability",
+    handler:async (_args,ctx)=>{
+      const cfg=readConfig().delegation;
+      const found=typeof pi.getAllTools==="function" &&
+        subagentReady(pi.getAllTools().map(t=>t.name));
+      const waves=delegationSchedule?.waves.map((w,i)=>
+        "Wave "+(i+1)+": "+w.execution+" · "+
+        w.tasks.map(t=>"#"+t.stepId).join(", ")+
+        (delegationSchedule?.runs?.some(r=>r.wave===i)?" · dispatched":"")).join("\n")??"No delegation schedule yet.";
+      ctx.ui.notify("Jev delegation: "+cfg.strategy+" · max "+cfg.maxConcurrentBuilders+
+        " Builders · agent "+cfg.builderAgent+"\nNative Pi subagent: "+
+        (found?"available":"missing")+"\n"+waves,"info");
     },
   });
 

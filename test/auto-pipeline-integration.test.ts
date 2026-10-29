@@ -42,6 +42,13 @@ test("Auto Implement -> QA -> Review advances only after verified tool results",
  try{
   writeFileSync(join(dir,"jev-model-manager.json"),JSON.stringify(cfg));
   const {default:ext}=await import("../index.ts");ext(pi);
+  tools.subagent={name:"subagent"};
+  const delegatedCalls=[];
+  ctx.executeTool=async(name,args,options)=>{
+    delegatedCalls.push({name,args,options});
+    return {content:[{type:"text",text:"Builders changed scoped files and ran focused tests."}],
+      details:{results:[{exitCode:0}]}};
+  };
   await events.session_start({},ctx);
   await commands["jev-plan"].handler("Plan a Gutenberg charity donation block",ctx);
   await events.agent_start({},ctx);
@@ -55,6 +62,29 @@ test("Auto Implement -> QA -> Review advances only after verified tool results",
   assert.equal(latest().status,"running");
   assert.equal(sent.length,2,"first user request and approved implementation");
   assert.ok(active.includes("jev_progress"));
+  assert.ok(active.includes("jev_delegate"));
+  assert.ok(active.includes("subagent"));
+  const delegation=await tools.jev_delegate.execute("delegate-plan",{
+    action:"plan",tasks:[
+      {stepId:1,files:["src/api/donation.ts"],dependsOn:[],effort:"medium"},
+      {stepId:2,files:["src/blocks/donate.ts"],dependsOn:[],effort:"medium"}
+    ]
+  },undefined,undefined,ctx);
+  assert.equal(delegation.isError,undefined);
+  const premature=await tools.jev_progress.execute("premature",{
+    action:"update",stepId:1,status:"done",note:"Not yet delegated"
+  },undefined,undefined,ctx);
+  assert.equal(premature.isError,true);
+  const directCall=await events.tool_call({toolName:"subagent",input:{agent:"worker",task:"x"}},ctx);
+  assert.equal(directCall?.block,true,"bypassing Jev's safe concurrency is blocked");
+  const delegated=await tools.jev_delegate.execute("run-wave",{action:"run"},undefined,undefined,ctx);
+  assert.equal(delegated.isError,false);
+  assert.equal(delegatedCalls.length,1);
+  assert.equal(delegatedCalls[0].name,"subagent");
+  assert.equal(delegatedCalls[0].args.tasks.length,2);
+  assert.equal(delegatedCalls[0].args.agentScope,"user");
+  const repeated=await tools.jev_delegate.execute("repeat-wave",{action:"run"},undefined,undefined,ctx);
+  assert.equal(repeated.isError,true,"cannot spawn duplicate wave before Lead verification");
   // Do not advance with unverified implementation steps.
   await events.agent_start({},ctx);
   await events.agent_settled({},ctx);
@@ -118,6 +148,19 @@ test("Auto Implement -> QA -> Review advances only after verified tool results",
   assert.equal(sent.length,beforeFailure,"failed QA must not schedule Review");
   await commands["jev-pipeline-stop"].handler("",ctx);
   assert.equal(latest().status,"cancelled");
+  // Starting another approved plan with no Pi subagent must not fake a spawn.
+  await commands["jev-plan-open"].handler("",ctx);
+  delete tools.subagent;
+  const noBackend=await tools.jev_delegate.execute("missing-plan",{action:"plan",
+    tasks:[{stepId:1,files:["src/api/donation.ts"],dependsOn:[],effort:"large"}]
+  },undefined,undefined,ctx);
+  assert.equal(noBackend.isError,undefined);
+  const beforeMissing=delegatedCalls.length;
+  const noSpawn=await tools.jev_delegate.execute("missing-run",{action:"run"},
+    undefined,undefined,ctx);
+  assert.equal(noSpawn.isError,true);
+  assert.match(noSpawn.content[0].text,/NO Builder was spawned/);
+  assert.equal(delegatedCalls.length,beforeMissing);
  }finally{
   if(previous===undefined)delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR=previous;

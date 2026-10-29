@@ -114,7 +114,7 @@ test("Pi commands enforce planning restrictions and route explicit intent", asyn
     await cmds["jev-review"].handler("Review existing code",ctx);
     assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user"]);
     await cmds["jev-implement"].handler("Implement approved donation block",ctx);
-    assert.deepEqual(active,[...original,"jev_progress"]);
+    assert.deepEqual(active,[...original,"jev_delegate","jev_progress"]);
     assert.equal((await events.tool_call({toolName:"write",input:{path:"x.ts"}},ctx))?.block,undefined);
     assert.equal(events.user_bash({command:"echo ok"},ctx),undefined);
     const impl=await route({reason:"user",messages:[{role:"user",content:"Plan but do not code"}]},ctx);

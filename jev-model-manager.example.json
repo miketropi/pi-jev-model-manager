@@ -2,6 +2,11 @@
   "version": 1,
   "enabled": false,
   "mode": "auto",
+  "delegation": {
+    "strategy": "prefer",
+    "maxConcurrentBuilders": 2,
+    "builderAgent": "worker"
+  },
   "classifier": {
     "provider": "typesafe",
     "model": "jev-latest"
