@@ -1,11 +1,13 @@
 /**
  * Pi Jev Model Manager — reference MVP.
- * Uses Pi native virtual models and classifier API. No proxy and no MCP server.
+ * Uses Pi native virtual models and classifier API; integrates with an existing 9Router proxy.
  *
  * Requires a recent @earendil-works/pi-coding-agent with virtual model support.
  * TypeSafe classifier credentials: TYPESAFE_API_KEY.
  */
 import type { Message } from "@earendil-works/pi-ai";
+import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, type TaskRules } from "./task-routing.ts";
+import { configureTaskRules } from "./task-ui.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
 import type {
@@ -63,6 +65,8 @@ interface Config {
   minProbability: number;
   nineRouter: NineRouterSettings;
   models: ManagedModel[];
+  taskRules: TaskRules;
+  subagentRouting: boolean;
 }
 interface Decision {
   model: string;
@@ -84,6 +88,8 @@ const defaults = (): Config => ({
   minProbability: 0.43,
   nineRouter: { baseUrl: DEFAULT_NINE_ROUTER_URL, apiKeyEnv: DEFAULT_NINE_ROUTER_KEY_ENV },
   models: [],
+  taskRules: defaultTaskRules(),
+  subagentRouting: false, // explicit opt-in: do not rewrite external spawn tools by default
 });
 
 function readConfig(): Config {
@@ -97,6 +103,8 @@ function readConfig(): Config {
       classifier: { ...d.classifier, ...raw.classifier },
       nineRouter: { ...d.nineRouter, ...raw.nineRouter },
       models: Array.isArray(raw.models) ? raw.models.filter((m) => typeof m?.key === "string") : [],
+      taskRules: normalizeTaskRules(raw.taskRules),
+      subagentRouting: raw.subagentRouting === true,
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);
@@ -205,10 +213,15 @@ async function choose(
     const probability = Number(modelAnswer.probabilities?.[modelAnswer.choice] ?? 0);
     const task = taskAnswer?.type === "choice" ? taskAnswer.choice : "unknown";
     if (!picked || !Number.isFinite(probability)) throw new Error("invalid model selection");
-    if (probability < config.minProbability) {
-      return { model: base.key, suggested: picked.key, task, probability, reason: "low confidence fallback" };
-    }
-    return { model: picked.key, task, probability, reason: "jev choice" };
+    const taskProbability = Number(taskAnswer?.probabilities?.[task] ?? 1);
+    // The task policy overrides Jev's model recommendation only when task
+    // classification is sufficiently confident and the target is available.
+    const jevModel = probability < config.minProbability ? base.key : picked.key;
+    const rule = applyTaskRule(task, jevModel, base.key, candidates.map((m) => m.key),
+      config.taskRules, taskProbability, config.minProbability);
+    return { model: rule.model, task, probability,
+      reason: rule.reason === "Jev auto" && probability < config.minProbability
+        ? "low confidence fallback" : rule.reason };
   } catch (e) {
     if (signal?.aborted) throw e;
     return {
@@ -407,6 +420,8 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
       `9Router key variable: ${config.nineRouter.apiKeyEnv}`,
       `Jev key: ${statusJev}`,
       "Routing & classifier options",
+      "Task routing (/jev-tasks)",
+      `Subagent auto-routing: ${config.subagentRouting ? "ON" : "OFF"}`,
       "Test 9Router connection",
       "Manage models (/jev-models)",
       "Done",
@@ -445,6 +460,11 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
         syncNineRouterProvider(pi, config);
       } else if (choice.startsWith("Jev key:")) {
         await configureStoredKey(pi, ctx, config, "jev");
+      } else if (choice === "Task routing (/jev-tasks)") {
+        await configureTaskRules(ctx, config.taskRules, config.models.filter(m => m.enabled), () => saveConfig(config));
+      } else if (choice.startsWith("Subagent auto-routing:")) {
+        config.subagentRouting = !config.subagentRouting;
+        saveConfig(config);
       } else if (choice === "Routing & classifier options") {
         await configureRoutingOptions(ctx, config);
         syncJevCredentials(pi, config);
@@ -634,6 +654,34 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // Subagent adapters: for known spawn tools accepting an optional "model"
+  // parameter, select a physical model once for the child's entire task.
+  // Covers pi-subagents-hub Agent and other spawn tools with a model argument.
+  // Does not touch the official reference "subagent" tool (its schema has no
+  // model field) or override an explicit user/agent model selection.
+  pi.on?.("tool_call", async (event, ctx) => {
+    const settings = readConfig();
+    if (!settings.enabled || !settings.subagentRouting || settings.mode !== "auto") return;
+    if (!["Agent", "agent_spawn", "spawn_agent", "subagent_spawn"].includes(event.toolName)) return;
+    const input = event.input as Record<string, unknown>;
+    if (input.model !== undefined && input.model !== null && input.model !== "") return;
+    const task = typeof input.task === "string" ? input.task :
+      typeof input.prompt === "string" ? input.prompt : "";
+    if (!task.trim()) return;
+    const candidates = physicalCandidates(settings, ctx);
+    if (!candidates.length) return;
+    const role = subagentTaskType(input);
+    // Explicit agent roles apply to task policies; otherwise classify the task.
+    const decision = role && settings.taskRules[role].mode !== "auto"
+      ? applyTaskRule(role, fallbackModel(candidates, settings).key,
+          fallbackModel(candidates, settings).key, candidates.map(m => m.key), settings.taskRules)
+      : null;
+    const model = decision?.model || (await choose(task, settings, candidates, ctx)).model;
+    if (!candidates.some(m => m.key === model)) return;
+    // This intentionally touches only adapters with a documented model option.
+    input.model = model;
+  });
+
   pi.registerCommand("jev-models", {
     description: "Open Jev Model Manager (TUI)",
     handler: async (_args, ctx) => {
@@ -648,6 +696,7 @@ export default function (pi: ExtensionAPI) {
           `Minimum probability: ${config.minProbability.toFixed(2)}`,
           "Add a model from Pi catalog",
           "Configure addon (/jev-config)",
+          "Task routing (/jev-tasks)",
           `9Router settings: ${resolveNineRouterBaseUrl(config.nineRouter)}${process.env[NINE_ROUTER_BASE_URL_ENV]?.trim() ? " [env]" : ""}`,
           "Scan 9Router models",
           ...names, "Done",
@@ -668,6 +717,8 @@ export default function (pi: ExtensionAPI) {
         } else if (choice === "Configure addon (/jev-config)") {
           await configureAddon(pi, ctx);
           config = readConfig();
+        } else if (choice === "Task routing (/jev-tasks)") {
+          await configureTaskRules(ctx, config.taskRules, config.models.filter(m => m.enabled), () => saveConfig(config));
         } else if (choice.startsWith("9Router settings:")) {
           if (await configureNineRouterSettings(ctx, config)) syncNineRouterProvider(pi, config);
         } else if (choice === "Scan 9Router models") {
@@ -696,6 +747,16 @@ export default function (pi: ExtensionAPI) {
         saveConfig(config);
       }
       ctx.ui.notify(`Saved Jev configuration: ${CONFIG_PATH}`, "info");
+    },
+  });
+
+  pi.registerCommand("jev-tasks", {
+    description: "Configure task-based model routing with searchable model selector",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      const config = readConfig();
+      await configureTaskRules(ctx, config.taskRules,
+        config.models.filter(m => m.enabled), () => saveConfig(config));
     },
   });
 

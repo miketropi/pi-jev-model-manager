@@ -56,6 +56,18 @@ Keys entered here are stored separately at `~/.pi/agent/jev-model-manager.secret
 
 Then run `/jev-scan` to import models and `/model` to select `jev-manager/auto`. Use `/jev-models` for detailed model capability editing. `/jev-test <task>` checks routing decisions without switching the active model.
 
+## Task routing & searchable model picker (v0.4)
+
+Run `/jev-tasks` (also available in `/jev-config` and `/jev-models`) to configure **Planning, Implementation, Debugging, Code Review, Research, and Explanation** independently. Each task supports **Auto** (Jev chooses), **Prefer** (use the selected eligible model), or **Force** (pin that model; if unavailable, use the configured fallback). Task overrides require sufficiently confident classification. Observe mode always executes the fallback.
+
+Choose **Search models** to filter by provider, model ID, or display name. The picker shows a maximum of 50 results at a time even when you have hundreds of configured models. Cancel leaves the previous rule unchanged. First import or add models via `/jev-scan` or `/jev-models`.
+
+### Subagent-aware routing (opt-in)
+
+In `/jev-config`, toggle **Subagent auto-routing: ON**. When main routing is ON in auto mode, the extension can fill an *unset* `model` argument in compatible spawning tools: `Agent` (pi-subagents-hub), `agent_spawn`, `spawn_agent`, and `subagent_spawn`. Explicit model assignments are never replaced. Known roles such as `planner`, `builder`, `reviewer`, `Plan`, and `Explore` map to task policies; other prompts are classified by Jev. The selected physical model stays fixed through the child run.
+
+**Limits:** Pi has no universal subagent spawn hook. The official example `subagent` tool has no model argument, so this addon does not change it. Compatibility depends on each third-party extension's model-override behavior. Children using `jev-9router/...` require the provider to be loaded in their own process (usually by installing this addon globally). A separate child may not inherit the parent runtime's in-memory credentials or extensions; test your subagent setup. Subagent routing defaults to **OFF**.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.

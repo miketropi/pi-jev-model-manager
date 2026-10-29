@@ -1,6 +1,6 @@
 {
   "name": "pi-jev-model-manager-mvp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Jev-based virtual model routing with native Pi model management dialogs",
