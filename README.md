@@ -50,6 +50,8 @@ Once the extension is loaded in Pi, run:
 
 Use the in-terminal menu to set the **9Router endpoint**, securely enter/replace/remove the **9Router API key** and **TypeSafe Jev API key**, configure **routing mode, fallback, confidence and classifier**, or **test 9Router connectivity**. API key entry is masked in Pi TUI (not available in RPC/print mode).
 
+**Paste API keys:** Open /jev-config → 9Router key or Jev key. Choose **Set / replace securely**, then use **Cmd+V** (macOS terminal paste) or **Ctrl+V** (read the OS clipboard) in the masked input. If your terminal does not forward paste, choose **Paste from system clipboard** directly from the key menu and confirm; only the key length is shown. Pasted credentials must be a single line (trailing clipboard newlines are stripped). Never paste keys into the normal Pi chat editor. The addon does not automatically clear the system clipboard after saving.
+
 Keys entered here are stored separately at `~/.pi/agent/jev-model-manager.secrets.json` (or under `PI_CODING_AGENT_DIR`) with file permissions `0600`, **not** in the routing JSON or Git repository. This is a local plaintext file protected by filesystem permissions, not an OS keychain. Shell-provided keys take precedence; a shell-provided endpoint can be overridden explicitly by choosing a custom URL in the menu. Environment-only configuration still works and is recommended for CI/headless use. Avoid storing keys on shared/untrusted machines.
 
 Then run `/jev-scan` to import models and `/model` to select `jev-manager/auto`. Use `/jev-models` for detailed model capability editing. `/jev-test <task>` checks routing decisions without switching the active model.

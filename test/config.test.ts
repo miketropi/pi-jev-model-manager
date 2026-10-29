@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialSource, readSecrets, resolveSecret, secretFilePath, writeSecrets } from "../secrets.ts";
-import { maskedInput } from "../config-ui.ts";
+import { maskedInput, normalizeSecretInput } from "../config-ui.ts";
 
 test("secure local store enforces 0600, supports rotation and env priority", () => {
   const home = mkdtempSync(join(tmpdir(), "jev-keys-"));
@@ -51,6 +51,88 @@ test("masked input never displays the credential and supports editing and cancel
   assert.equal(noRpc, undefined);
 });
 
+test("terminal Cmd+V bracketed paste accepts long keys without displaying them", async () => {
+  const pastedKey = "sk-" + "Ab3_".repeat(150);
+  let renders: string[][] = [];
+  const result = await maskedInput({
+    mode: "tui",
+    ui: { custom: async (factory: any) => {
+      let submitted: string | undefined;
+      const widget = factory({ requestRender() {} }, { fg: (_color: string, v: string) => v },
+        { matches: (data: string, key: string) => (key === "tui.select.confirm" && data === "\r") || (key === "tui.select.cancel" && data === "\x1b") },
+        (answer: string | undefined) => { submitted = answer; });
+      // Mirrors Pi's real stdin buffering: a bracketed paste can arrive in chunks.
+      widget.handleInput("\x1b[200~" + pastedKey.slice(0, 80));
+      widget.handleInput(pastedKey.slice(80) + "\n\x1b[201~");
+      renders.push(widget.render(100));
+      widget.handleInput("\r");
+      return submitted;
+    } },
+  } as any, "Paste API key");
+  assert.equal(result, pastedKey);
+  assert.ok(!renders.flat().join(" ").includes(pastedKey));
+  assert.ok(!renders.flat().join(" ").includes(pastedKey.slice(0, 32)));
+});
+
+test("Ctrl+V clipboard paste stays masked and cancel cannot save a pending paste", async () => {
+  const key = "proxy-test-key-" + "xyz".repeat(50);
+  let release!: (text: string) => void;
+  const pending = new Promise<string>((resolve) => { release = resolve; });
+  const testHarness = async (factory: any, events: string[], onInput?: (widget: any) => void) => {
+    let submitted: string | undefined;
+    const widget = factory({ requestRender() {} }, { fg: (_color: string, v: string) => v },
+      { matches: (data: string, name: string) => (name === "tui.select.confirm" && data === "\r") || (name === "tui.select.cancel" && data === "\x1b") },
+      (answer: string | undefined) => { submitted = answer; });
+    for (const event of events) widget.handleInput(event);
+    onInput?.(widget);
+    await new Promise((r) => setImmediate(r));
+    return { widget, get submitted() { return submitted; } };
+  };
+  let output: string[] = [];
+  const result = await maskedInput({ mode: "tui", ui: { custom: async (factory: any) => {
+    const h = await testHarness(factory, ["\x16"]);
+    // Paste completion is asynchronous; no value exposed while loading.
+    assert.equal(h.submitted, undefined);
+    release(key);
+    await new Promise((r) => setImmediate(r));
+    output = h.widget.render(120);
+    h.widget.handleInput("\r");
+    return h.submitted;
+  } } } as any, "Secret", () => pending);
+  assert.equal(result, key);
+  assert.ok(!output.join(" ").includes(key));
+
+  let canceled: string | undefined = "not-finished";
+  await maskedInput({ mode: "tui", ui: { custom: async (factory: any) => {
+    const h = await testHarness(factory, ["\x16", "\x1b"]);
+    canceled = h.submitted;
+    return h.submitted;
+  } } } as any, "Secret", async () => key);
+  assert.equal(canceled, undefined);
+});
+
+test("invalid pasted multiline, blank and oversized clipboard values are rejected", async () => {
+  assert.throws(() => normalizeSecretInput("line1\nline2"), /single-line/);
+  assert.throws(() => normalizeSecretInput("   "), /single-line/);
+  assert.throws(() => normalizeSecretInput("a".repeat(8193)), /maximum/);
+  assert.equal(normalizeSecretInput("  sk-sample-key\n"), "sk-sample-key");
+  const sent = "\x1b[200~first\nsecond\x1b[201~";
+  let status: string[] = [];
+  const result = await maskedInput({ mode: "tui", ui: { custom: async (factory: any) => {
+    let submitted: string | undefined;
+    const widget = factory({ requestRender() {} }, { fg: (_color: string, v: string) => v },
+      { matches: (data: string, name: string) => (name === "tui.select.confirm" && data === "\r") || (name === "tui.select.cancel" && data === "\x1b") },
+      (answer: string | undefined) => { submitted = answer; });
+    widget.handleInput(sent);
+    status = widget.render(120);
+    widget.handleInput("\x1b");
+    return submitted;
+  } } } as any, "Secret");
+  assert.equal(result, undefined);
+  assert.ok(status.join(" ").includes("single-line"));
+  assert.ok(!status.join(" ").includes("first"));
+});
+
 test("/jev-config saves credentials separately from policy and registers TypeSafe provider", async () => {
   const dir = mkdtempSync(join(tmpdir(), "jev-config-flow-"));
   const original = {
@@ -83,6 +165,9 @@ test("/jev-config saves credentials separately from policy and registers TypeSaf
         select: async (_title: string, options: string[]) => {
           const wanted = steps[n++];
           const chosen = options.find((s) => s.startsWith(wanted));
+          if (wanted === "Set / replace securely") {
+            assert.ok(options.includes("Paste from system clipboard"), "Clipboard fallback missing from key settings");
+          }
           assert.ok(chosen, `Expected choice ${wanted} in ${options.join(", ")}`);
           return chosen;
         },

@@ -6,7 +6,7 @@
  * TypeSafe classifier credentials: TYPESAFE_API_KEY.
  */
 import type { Message } from "@earendil-works/pi-ai";
-import { maskedInput } from "./config-ui.ts";
+import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
 import type {
   ExtensionAPI,
@@ -313,14 +313,29 @@ async function configureStoredKey(
   const envName = kind === "jev" ? "TYPESAFE_API_KEY" : config.nineRouter.apiKeyEnv;
   const title = kind === "jev" ? "TypeSafe Jev" : "9Router";
   const source = credentialSource(kind, envName);
-  const options = ["Set / replace securely", ...(readSecrets()[kind] ? ["Delete saved key"] : []), "Back"];
+  const options = ["Set / replace securely", "Paste from system clipboard", ...(readSecrets()[kind] ? ["Delete saved key"] : []), "Back"];
   const action = await ctx.ui.select(`${title} API key · ${source === "env" ? "environment" : source === "stored" ? "saved" : "missing"}`, options);
-  if (action === "Set / replace securely") {
+  if (action === "Set / replace securely" || action === "Paste from system clipboard") {
     if (source === "env") {
       ctx.ui.notify(`${envName} from your shell has priority. Remove it from the Pi environment to use a saved key.`, "warning");
       return;
     }
-    const key = await maskedInput(ctx, `Enter ${title} API key (masked)`);
+    let key: string | undefined;
+    if (action === "Paste from system clipboard") {
+      const clipboard = await readSystemClipboardText();
+      if (!clipboard) {
+        ctx.ui.notify("No text in clipboard. Try Set / replace securely and use your terminal Paste shortcut.", "warning");
+        return;
+      }
+      try { key = normalizeSecretInput(clipboard); }
+      catch (e) {
+        ctx.ui.notify(e instanceof Error ? e.message : "Invalid API key in clipboard", "warning");
+        return;
+      }
+      if (!await ctx.ui.confirm(`Save ${title} key from clipboard?`, `Key length: ${key.length} characters (value hidden)`)) return;
+    } else {
+      key = await maskedInput(ctx, `Enter ${title} API key (masked)`);
+    }
     if (!key) return;
     const secrets = readSecrets();
     secrets[kind] = key;
