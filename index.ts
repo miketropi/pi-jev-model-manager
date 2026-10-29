@@ -6,6 +6,8 @@
  * TypeSafe classifier credentials: TYPESAFE_API_KEY.
  */
 import type { Message } from "@earendil-works/pi-ai";
+import { maskedInput } from "./config-ui.ts";
+import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -228,7 +230,9 @@ function syncNineRouterProvider(pi: ExtensionAPI, config: Config): void {
   pi.registerProvider(NINE_ROUTER_PROVIDER, {
     name: "9Router · Jev Manager",
     baseUrl,
-    apiKey: `$${envName}`,
+    apiKey: credentialSource("nineRouter", envName) === "stored"
+      ? resolveSecret("nineRouter", envName)!
+      : `$${envName}`,
     api: "openai-completions",
     authHeader: true,
     models: imported.map((m) => ({
@@ -286,6 +290,7 @@ async function configureNineRouterSettings(ctx: ExtensionContext, config: Config
     config.nineRouter = {
       baseUrl: normalizeNineRouterBaseUrl(baseUrlInput),
       apiKeyEnv: validateEnvName(apiEnvInput),
+      endpointSource: config.nineRouter.endpointSource,
     };
     saveConfig(config);
     return true;
@@ -295,11 +300,157 @@ async function configureNineRouterSettings(ctx: ExtensionContext, config: Config
   }
 }
 
+/** When an in-app Jev key exists, register a provider-scoped override without modifying process.env. */
+function syncJevCredentials(pi: ExtensionAPI, config: Config): void {
+  if (credentialSource("jev", "TYPESAFE_API_KEY") === "stored" && config.classifier.provider === "typesafe") {
+    pi.registerProvider("typesafe", { apiKey: resolveSecret("jev", "TYPESAFE_API_KEY")! });
+  }
+}
+
+async function configureStoredKey(
+  pi: ExtensionAPI, ctx: ExtensionContext, config: Config, kind: SecretKind,
+): Promise<void> {
+  const envName = kind === "jev" ? "TYPESAFE_API_KEY" : config.nineRouter.apiKeyEnv;
+  const title = kind === "jev" ? "TypeSafe Jev" : "9Router";
+  const source = credentialSource(kind, envName);
+  const options = ["Set / replace securely", ...(readSecrets()[kind] ? ["Delete saved key"] : []), "Back"];
+  const action = await ctx.ui.select(`${title} API key · ${source === "env" ? "environment" : source === "stored" ? "saved" : "missing"}`, options);
+  if (action === "Set / replace securely") {
+    if (source === "env") {
+      ctx.ui.notify(`${envName} from your shell has priority. Remove it from the Pi environment to use a saved key.`, "warning");
+      return;
+    }
+    const key = await maskedInput(ctx, `Enter ${title} API key (masked)`);
+    if (!key) return;
+    const secrets = readSecrets();
+    secrets[kind] = key;
+    writeSecrets(secrets);
+    if (kind === "jev") syncJevCredentials(pi, config);
+    else syncNineRouterProvider(pi, config);
+    ctx.ui.notify(`${title} key saved in protected user-level storage.`, "info");
+  } else if (action === "Delete saved key") {
+    if (!await ctx.ui.confirm(`Delete saved ${title} key?`, "This will remove the addon-stored credential; shell variables are unaffected.")) return;
+    const secrets = readSecrets();
+    delete secrets[kind];
+    writeSecrets(secrets);
+    if (kind === "jev") {
+      // The provider override is kept until reload so we do not disrupt another extension's provider.
+      ctx.ui.notify("Stored Jev key deleted. Run /reload to refresh TypeSafe authentication.", "info");
+    } else {
+      syncNineRouterProvider(pi, config);
+      ctx.ui.notify("Stored 9Router key deleted; shell credentials, if any, remain usable.", "info");
+    }
+  }
+}
+
+async function configureRoutingOptions(ctx: ExtensionContext, config: Config): Promise<void> {
+  while (true) {
+    const choice = await ctx.ui.select("Jev routing settings", [
+      `Enabled: ${config.enabled ? "ON" : "OFF"}`,
+      `Mode: ${config.mode}`,
+      `Minimum confidence: ${config.minProbability.toFixed(2)}`,
+      `Fallback: ${config.fallback || "not set"}`,
+      `Classifier: ${config.classifier.provider}/${config.classifier.model}`,
+      "Back",
+    ]);
+    if (!choice || choice === "Back") return;
+    if (choice.startsWith("Enabled:")) config.enabled = !config.enabled;
+    else if (choice.startsWith("Mode:")) config.mode = config.mode === "auto" ? "observe" : "auto";
+    else if (choice.startsWith("Minimum confidence:")) {
+      const raw = await ctx.ui.input("Minimum Jev confidence (0–1)", String(config.minProbability));
+      if (raw != null) {
+        const n = Number(raw);
+        if (raw.trim() && Number.isFinite(n) && n >= 0 && n <= 1) config.minProbability = n;
+        else ctx.ui.notify("Enter a number from 0 to 1.", "warning");
+      }
+    } else if (choice.startsWith("Fallback:")) {
+      const models = config.models.filter(m => m.enabled).map(m => m.key);
+      if (!models.length) ctx.ui.notify("Import or enable a model first with /jev-models.", "warning");
+      else config.fallback = await ctx.ui.select("Choose fallback", models) || config.fallback;
+    } else if (choice.startsWith("Classifier:")) {
+      const provider = await ctx.ui.input("Classifier provider", config.classifier.provider);
+      if (!provider?.trim()) continue;
+      const model = await ctx.ui.input("Classifier model ID", config.classifier.model);
+      if (!model?.trim()) continue;
+      config.classifier = { provider: provider.trim(), model: model.trim() };
+    }
+    saveConfig(config);
+  }
+}
+
+/** Central, extensible configuration screen, accessible via /jev-config and /jev-models. */
+async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  if (!ctx.hasUI) return;
+  const config = readConfig();
+  while (true) {
+    const status9 = credentialSource("nineRouter", config.nineRouter.apiKeyEnv);
+    const statusJev = credentialSource("jev", "TYPESAFE_API_KEY");
+    const url = resolveNineRouterBaseUrl(config.nineRouter);
+    const choice = await ctx.ui.select("Jev Model Manager · Configuration", [
+      `9Router endpoint: ${url}${config.nineRouter.endpointSource === "saved" ? " [saved]" : process.env[NINE_ROUTER_BASE_URL_ENV]?.trim() ? " [env]" : ""}`,
+      `9Router key: ${status9}`,
+      `9Router key variable: ${config.nineRouter.apiKeyEnv}`,
+      `Jev key: ${statusJev}`,
+      "Routing & classifier options",
+      "Test 9Router connection",
+      "Manage models (/jev-models)",
+      "Done",
+    ]);
+    if (!choice || choice === "Done") break;
+    try {
+      if (choice.startsWith("9Router endpoint:")) {
+        const override = process.env[NINE_ROUTER_BASE_URL_ENV]?.trim();
+        if (override) {
+          const preference = await ctx.ui.select("9Router URL source", [
+            "Use a custom URL (override environment)",
+            "Use NINEROUTER_BASE_URL from environment",
+            "Back",
+          ]);
+          if (!preference || preference === "Back") continue;
+          if (preference.startsWith("Use NINEROUTER_BASE_URL")) {
+            config.nineRouter.endpointSource = "auto";
+            saveConfig(config);
+            syncNineRouterProvider(pi, config);
+            continue;
+          }
+          config.nineRouter.endpointSource = "saved";
+        }
+        const input = await ctx.ui.input("9Router base URL", config.nineRouter.baseUrl);
+        if (input == null) continue;
+        config.nineRouter.baseUrl = normalizeNineRouterBaseUrl(input);
+        saveConfig(config);
+        syncNineRouterProvider(pi, config);
+      } else if (choice.startsWith("9Router key:")) {
+        await configureStoredKey(pi, ctx, config, "nineRouter");
+      } else if (choice.startsWith("9Router key variable:")) {
+        const input = await ctx.ui.input("9Router API key environment variable name", config.nineRouter.apiKeyEnv);
+        if (input == null) continue;
+        config.nineRouter.apiKeyEnv = validateEnvName(input);
+        saveConfig(config);
+        syncNineRouterProvider(pi, config);
+      } else if (choice.startsWith("Jev key:")) {
+        await configureStoredKey(pi, ctx, config, "jev");
+      } else if (choice === "Routing & classifier options") {
+        await configureRoutingOptions(ctx, config);
+        syncJevCredentials(pi, config);
+      } else if (choice === "Test 9Router connection") {
+        const models = await scanNineRouter(config.nineRouter, fetch, resolveSecret("nineRouter", config.nineRouter.apiKeyEnv));
+        ctx.ui.notify(`9Router connection OK · ${models.length} model IDs discovered.`, "info");
+      } else if (choice === "Manage models (/jev-models)") {
+        ctx.ui.notify("Use /jev-models to import and edit models after leaving this menu.", "info");
+      }
+    } catch (error) {
+      // Error text from the scanner is sanitized and never includes keys.
+      ctx.ui.notify(error instanceof Error ? error.message : "Configuration failed", "warning");
+    }
+  }
+}
+
 async function scanAndImportNineRouter(pi: ExtensionAPI, ctx: ExtensionContext, config: Config): Promise<void> {
   if (!ctx.hasUI) return;
   let discovered: DiscoveredModel[];
   try {
-    discovered = await scanNineRouter(config.nineRouter);
+    discovered = await scanNineRouter(config.nineRouter, fetch, resolveSecret("nineRouter", config.nineRouter.apiKeyEnv));
   } catch (e) {
     ctx.ui.notify(e instanceof Error ? e.message : "9Router scan failed", "error");
     return;
@@ -429,6 +580,7 @@ export default function (pi: ExtensionAPI) {
   // Saved imports are available immediately on startup, even when the proxy is offline.
   // Discovery itself is intentionally manual and never sends task prompts to 9Router.
   syncNineRouterProvider(pi, readConfig());
+  syncJevCredentials(pi, readConfig());
 
   pi.registerVirtualModel<RouteState>({
     provider: ROUTER_PROVIDER,
@@ -480,6 +632,7 @@ export default function (pi: ExtensionAPI) {
           `Fallback: ${config.fallback || "not set"}`,
           `Minimum probability: ${config.minProbability.toFixed(2)}`,
           "Add a model from Pi catalog",
+          "Configure addon (/jev-config)",
           `9Router settings: ${resolveNineRouterBaseUrl(config.nineRouter)}${process.env[NINE_ROUTER_BASE_URL_ENV]?.trim() ? " [env]" : ""}`,
           "Scan 9Router models",
           ...names, "Done",
@@ -497,6 +650,9 @@ export default function (pi: ExtensionAPI) {
             if (Number.isFinite(n) && n >= 0 && n <= 1) config.minProbability = n;
             else ctx.ui.notify("Enter a number between 0 and 1", "warning");
           }
+        } else if (choice === "Configure addon (/jev-config)") {
+          await configureAddon(pi, ctx);
+          config = readConfig();
         } else if (choice.startsWith("9Router settings:")) {
           if (await configureNineRouterSettings(ctx, config)) syncNineRouterProvider(pi, config);
         } else if (choice === "Scan 9Router models") {
@@ -526,6 +682,11 @@ export default function (pi: ExtensionAPI) {
       }
       ctx.ui.notify(`Saved Jev configuration: ${CONFIG_PATH}`, "info");
     },
+  });
+
+  pi.registerCommand("jev-config", {
+    description: "Configure 9Router endpoint, API keys and routing options",
+    handler: async (_args, ctx) => { await configureAddon(pi, ctx); },
   });
 
   pi.registerCommand("jev-scan", {

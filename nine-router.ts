@@ -7,6 +7,7 @@ export const DEFAULT_NINE_ROUTER_KEY_ENV = "NINEROUTER_API_KEY";
 export interface NineRouterSettings {
   baseUrl: string;
   apiKeyEnv: string;
+  endpointSource?: "auto" | "saved"; // explicitly use saved URL even when shell sets NINEROUTER_BASE_URL
 }
 
 export interface DiscoveredModel {
@@ -55,21 +56,22 @@ export function normalizeNineRouterBaseUrl(value: string): string {
 
 /** An env override takes precedence over the persisted URL for BOTH discovery and generation. */
 export function resolveNineRouterBaseUrl(
-  settings: Pick<NineRouterSettings, "baseUrl">,
+  settings: Pick<NineRouterSettings, "baseUrl" | "endpointSource">,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const override = env[NINE_ROUTER_BASE_URL_ENV]?.trim();
-  return normalizeNineRouterBaseUrl(override || settings.baseUrl);
+  return normalizeNineRouterBaseUrl(settings.endpointSource === "saved" ? settings.baseUrl : (override || settings.baseUrl));
 }
 
 export async function scanNineRouter(
   settings: NineRouterSettings,
   fetcher: typeof fetch = fetch,
+  apiKeyOverride?: string,
 ): Promise<DiscoveredModel[]> {
   const baseUrl = resolveNineRouterBaseUrl(settings);
   const envName = validateEnvName(settings.apiKeyEnv);
-  const apiKey = process.env[envName];
-  if (!apiKey) throw new Error(`Missing ${envName}. Set it in the environment before starting Pi.`);
+  const apiKey = process.env[envName]?.trim() || apiKeyOverride;
+  if (!apiKey) throw new Error(`Missing ${envName}. Set it using /jev-config or your shell environment.`);
 
   let response: Response;
   try {

@@ -6,3 +6,6 @@ coverage/
 !.env.example
 jev-model-manager.json
 *.log
+
+# Never commit interactive addon credentials
+jev-model-manager.secrets.json

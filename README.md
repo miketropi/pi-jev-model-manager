@@ -20,7 +20,7 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 ## Requirements
 - Recent Pi from `@earendil-works/pi-coding-agent` with **virtual model** and **classifier** APIs. Pi 1.0 docs describe these APIs.
 - Configure a generation provider in Pi using `/login` (or environment credentials).
-- Set `TYPESAFE_API_KEY` in the environment used to launch Pi, for example `export TYPESAFE_API_KEY=...`.
+- Configure the TypeSafe Jev key using `/jev-config`, or provide `TYPESAFE_API_KEY` in Pi's launch environment.
 - Node.js compatible with your installed Pi build.
 
 ## Quick Setup with AI Agent
@@ -39,6 +39,20 @@ https://github.com/miketropi/pi-jev-model-manager
 
 Work autonomously where safe. Ask only when credentials or important decisions are required. Report the setup status and any remaining issues.
 ```
+
+## Quick configuration (/jev-config)
+
+Once the extension is loaded in Pi, run:
+
+```text
+/jev-config
+```
+
+Use the in-terminal menu to set the **9Router endpoint**, securely enter/replace/remove the **9Router API key** and **TypeSafe Jev API key**, configure **routing mode, fallback, confidence and classifier**, or **test 9Router connectivity**. API key entry is masked in Pi TUI (not available in RPC/print mode).
+
+Keys entered here are stored separately at `~/.pi/agent/jev-model-manager.secrets.json` (or under `PI_CODING_AGENT_DIR`) with file permissions `0600`, **not** in the routing JSON or Git repository. This is a local plaintext file protected by filesystem permissions, not an OS keychain. Shell-provided keys take precedence; a shell-provided endpoint can be overridden explicitly by choosing a custom URL in the menu. Environment-only configuration still works and is recommended for CI/headless use. Avoid storing keys on shared/untrusted machines.
+
+Then run `/jev-scan` to import models and `/model` to select `jev-manager/auto`. Use `/jev-models` for detailed model capability editing. `/jev-test <task>` checks routing decisions without switching the active model.
 
 ## How to use
 
@@ -81,9 +95,9 @@ Start Pi normally, or use `/reload` if Pi is already open. Use **one installatio
 
 > The extension is a TypeScript Pi extension, not a standalone CLI application. You do not need to run `npm install` for the extension itself; `npm test` uses the built-in Node.js test runner.
 
-### 3. Set the 9Router and Jev environment variables
+### 3. Configure 9Router and Jev credentials
 
-Set all three variables **in the same shell/environment that starts Pi**:
+**Recommended:** open `/jev-config` inside Pi and set your endpoint plus both API keys with the secure TUI. Alternatively, set all three variables **in the same shell/environment that starts Pi**:
 
 ```bash
 export NINEROUTER_BASE_URL="http://127.0.0.1:20128/v1"
@@ -109,7 +123,7 @@ Endpoint precedence is:
 
 In `/jev-models` the active URL is marked `[env]` when an environment override is set. To change the endpoint in that case, change the environment variable and **restart Pi**; editing the saved URL does not override it.
 
-The file `.env.example` is a reference only. **Pi does not automatically load `.env`.** Export the variables or source your local file before starting Pi. Never commit actual keys to Git.
+For interactive use, `/jev-config` removes the need to write your own `.env` file. The file `.env.example` is a reference only. **Pi does not automatically load `.env`.** Export the variables or source your local file before starting Pi. Never commit actual keys to Git.
 
 #### Check 9Router before opening Pi
 
@@ -197,7 +211,8 @@ If you leave Pi on an ordinary physical model in `/model`, the Jev virtual route
 
 | Command | What it does |
 | --- | --- |
-| `/jev-models` | Edit models, 9Router settings, fallback, confidence and routing mode |
+| `/jev-config` | Configure endpoint, masked API keys, routing settings, classifier and connection check |
+| `/jev-models` | Edit models and model-specific capabilities |
 | `/jev-scan` | List/filter/import models from 9Router |
 | `/jev-test <task>` | Ask Jev for a **dry-run** decision; does not change the active Pi model |
 | `/jev-status` | Show enabled/mode state, candidate count, fallback and latest real routing decision |
@@ -242,10 +257,10 @@ Re-run `/jev-scan` only when you want to discover newly added 9Router models. To
 | Symptom | Check / fix |
 | --- | --- |
 | `/jev-models` or `/jev-scan` is unknown | Confirm `pi -e ./index.ts` launched successfully, or that the extension is installed globally and reloaded |
-| `Missing NINEROUTER_API_KEY` | Export the key in the same environment that launches Pi; see `.env.example` |
+| `Missing NINEROUTER_API_KEY` | Run `/jev-config` and enter the key securely, or export it before starting Pi |
 | 9Router HTTP `401` | Verify the key, endpoint and access permissions; test with `curl` above |
 | Cannot reach 9Router / scan timeout | Verify `NINEROUTER_BASE_URL`, reachability, HTTPS/TLS and reverse-proxy path. `localhost` inside Docker or on a remote VPS may not be the same host as Pi |
-| 9Router URL in TUI won't change | `NINEROUTER_BASE_URL` overrides the JSON setting; change the environment variable and restart Pi |
+| 9Router URL in TUI won't change | In `/jev-config`, choose **Use a custom URL (override environment)**; otherwise the environment variable wins |
 | Model appears in the scan but calls fail | `/v1/models` does not prove the selected model is functional, within quota, chat-capable or tool-capable; test the physical model directly |
 | Jev selects fallback every time | Check Routing is ON, at least two enabled/available candidates, `TYPESAFE_API_KEY`, classifier availability, and Minimum probability |
 | `/jev-test` works but tasks do not auto-route | Use `/model` and choose `jev-manager/auto`; confirm **Mode = auto** rather than `observe` |

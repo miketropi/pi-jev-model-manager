@@ -18,6 +18,10 @@ test("normalizes root URL, /v1 URL, and /v1/models", () => {
   assert.throws(() => normalizeNineRouterBaseUrl("https://gateway.example/v1?token=secret"), /credentials/);
 });
 
+test("explicit saved endpoint can override inherited environment URL", () => {
+  assert.equal(resolveNineRouterBaseUrl({baseUrl: "https://saved.example/v1", endpointSource:"saved"}, {NINEROUTER_BASE_URL:"https://environment.example/v1"}), "https://saved.example/v1");
+});
+
 test("environment URL takes precedence and normalizes the endpoint", () => {
   assert.equal(resolveNineRouterBaseUrl(settings, {}), "http://localhost:20128/v1");
   assert.equal(resolveNineRouterBaseUrl(settings, { NINEROUTER_BASE_URL: "https://proxy.example.org" }), "https://proxy.example.org/v1");
