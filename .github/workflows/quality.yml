@@ -1,0 +1,55 @@
+name: Quality Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  source-quality:
+    name: Node ${{ matrix.node }} · syntax, tests, package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Syntax and package hygiene
+        run: npm run lint
+      - name: Regression tests
+        run: npm test
+      - name: Package smoke test
+        run: |
+          npm run package:release
+          cd dist
+          sha256sum --check SHA256SUMS
+
+  workflow-lint:
+    name: GitHub Actions YAML · actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download pinned actionlint and verify checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3             "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz"             -o /tmp/actionlint.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum --check
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint

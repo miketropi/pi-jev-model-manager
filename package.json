@@ -8,9 +8,15 @@
     "extensions": [
       "./index.ts"
     ],
-    "skills": ["./skills"]
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "lint": "node scripts/check-quality.mjs",
+    "check": "npm run lint && npm test",
+    "release:verify": "node scripts/verify-tag.mjs",
+    "release:package": "node scripts/package-release.mjs"
   }
 }

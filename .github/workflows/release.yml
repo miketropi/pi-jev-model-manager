@@ -1,0 +1,53 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Required release quality checks
+    uses: ./.github/workflows/quality.yml
+
+  release:
+    name: Package and publish GitHub Release
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Match tag to package version
+        run: npm run release:verify
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Assemble release archives
+        run: npm run package:release
+      - name: Verify SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+      - name: Publish release with artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG"             "dist/pi-jev-model-manager-$RELEASE_TAG.zip"             "dist/pi-jev-model-manager-$RELEASE_TAG.tar.gz"             "dist/SHA256SUMS"             --verify-tag             --generate-notes             --title "$RELEASE_TAG"

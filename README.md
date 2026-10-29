@@ -318,6 +318,45 @@ Check DNS, HTTPS_PROXY and TLS certificates.
 
 If both methods fail, verify the machine's network/DNS, proxy configuration and certificate store. The addon cannot bypass a firewall or a site's rate limit. System curl must be installed for the fallback; you can disable it with `JEV_WEB_FETCH_CURL=0`. Do not disable TLS validation to work around certificate problems. Proxy credentials are not copied into logs intentionally, and the CLI uses an argument array without shell execution. Private-host validation is not a complete DNS-rebinding defense; do not treat Jev's web reader as a hardened general-purpose browser.
 
+## Automated Quality Checks & GitHub Releases
+
+Two GitHub Actions workflows automate validation and releases:
+
+| Workflow | Trigger | Behavior |
+|---|---|---|
+| [Quality Checks](https://github.com/miketropi/pi-jev-model-manager/actions/workflows/quality.yml) | Push to `main`, pull requests, manual runs, or reusable call | Node 22/24 syntax + hygiene checks, full regression tests, release bundle smoke tests, SHA-256 checksums and `actionlint` validation |
+| [Release Package](https://github.com/miketropi/pi-jev-model-manager/actions/workflows/release.yml) | Push version tag such as `v0.8.2` | Reuses quality checks, verifies the tag matches `package.json`, builds archives and publishes a GitHub Release |
+
+Release assets include `pi-jev-model-manager-vX.Y.Z.zip`, `pi-jev-model-manager-vX.Y.Z.tar.gz` and `SHA256SUMS`. Both archives contain a single `pi-jev-model-manager/` directory with runtime TypeScript files, `package.json`, bundled `skills/`, README and bundled assets. Packaging excludes tests, credentials, local `.env` files, `node_modules` and build output. It does **not** publish to npm; the repository remains `"private": true`.
+
+### Create a release tag
+
+Update `package.json` to the intended release version, commit and push, then tag that **same commit**:
+
+```bash
+# Example: package.json has "version": "0.8.2"
+npm run check
+git add package.json
+git commit -m "chore: release v0.8.2"
+git push origin main
+git tag v0.8.2
+git push origin v0.8.2
+```
+
+Release requires a tag that matches `v` + `package.json.version` exactly. Failed tests or a mismatch stop the workflow **before** publishing a release. The release job uses GitHub's scoped `GITHUB_TOKEN` with `contents: write`; no personal access token is necessary. A tag is not created automatically by configuring these workflows.
+
+### Local checks
+
+```bash
+npm run lint             # TS/JS syntax, merge markers and Pi manifest structure
+npm test                 # Node regression suite
+npm run check            # both quality checks
+npm run release:package  # dist/*.zip, dist/*.tar.gz, dist/SHA256SUMS
+RELEASE_TAG=v0.8.1 npm run release:verify
+```
+
+The initial `lint` step is a dependency-free syntax/structure gate, **not** complete semantic TypeScript type checking or full ESLint rules. That requires a compatible Pi SDK/TypeScript configuration and locked development dependencies.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.
