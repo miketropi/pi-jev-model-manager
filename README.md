@@ -21,69 +21,219 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 - Set `TYPESAFE_API_KEY` in the environment used to launch Pi, for example `export TYPESAFE_API_KEY=...`.
 - Node.js compatible with your installed Pi build.
 
-## Local install / quick test
+## How to use
+
+This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.
+
+### 1. Prerequisites
+
+You need:
+
+- A recent version of **Pi** with extension, virtual-model, and classifier support.
+- **9Router** running locally or at a reachable HTTPS URL, plus a working 9Router API key.
+- A **TypeSafe API key** for Jev-based task classification.
+- Node.js **22+** if you want to run the included offline tests.
+
+If your Pi already uses 9Router as a provider, leave that configuration in place. The extension registers imported models separately as `jev-9router/...` and does **not** overwrite your existing `9router` provider.
+
+### 2. Install and launch the extension
+
+Clone the repository:
 
 ```bash
-pi -e /absolute/path/to/pi-jev-model-manager/index.ts
+git clone git@github.com:miketropi/pi-jev-model-manager.git
+cd pi-jev-model-manager
 ```
 
-In Pi TUI:
+**Option A — Run directly from this project (best for evaluation):**
 
-1. `/jev-models`: select **Add a model from Pi catalog** and enter meaningful specialties/avoid cases. Add at least two models, select fallback, toggle routing ON.
-2. `/model` -> select `jev-manager/auto`.
-3. `/jev-test Implement a Gutenberg custom block with inspector controls`.
-4. Submit a real task; inspect the footer, `/jev-status` and `/session`.
+```bash
+pi -e ./index.ts
+```
 
-To enable global auto-discovery instead, copy the directory to `~/.pi/agent/extensions/jev-model-manager/`, and run `/reload`.
+**Option B — Install for regular Pi sessions:**
 
-## 9Router model discovery (endpoint environment override in v0.2.1)
+```bash
+mkdir -p ~/.pi/agent/extensions/jev-model-manager
+cp index.ts nine-router.ts ~/.pi/agent/extensions/jev-model-manager/
+```
 
-### 9Router endpoint environment variable (v0.2.1)
+Start Pi normally, or use `/reload` if Pi is already open. Use **one installation method at a time** to avoid loading the same extension twice. When updating an existing global copy, update that copy too; `git pull` in a separate source checkout does not update the global installation automatically.
 
-Set the 9Router base endpoint and key in the shell **before launching Pi**:
+> The extension is a TypeScript Pi extension, not a standalone CLI application. You do not need to run `npm install` for the extension itself; `npm test` uses the built-in Node.js test runner.
+
+### 3. Set the 9Router and Jev environment variables
+
+Set all three variables **in the same shell/environment that starts Pi**:
 
 ```bash
 export NINEROUTER_BASE_URL="http://127.0.0.1:20128/v1"
 export NINEROUTER_API_KEY="your-9router-api-key"
+export TYPESAFE_API_KEY="your-typesafe-api-key"
+
+pi -e ./index.ts
 ```
 
-A remote proxy should use HTTPS. The URL may point at the gateway root, /v1, or /v1/models; it is normalized to a /v1 base. A nonempty NINEROUTER_BASE_URL has priority over the saved nineRouter.baseUrl in the JSON config and the localhost default. The same resolved URL is used for both model scanning and generation. No endpoint or API key is written to JSON from the environment. When the environment override is active, the /jev-models UI shows [env]. Update the shell variable and restart Pi to change it. See .env.example for available variables. Pi does **not** load .env automatically.
+For a remote reverse proxy, use its HTTPS base URL instead:
 
+```bash
+export NINEROUTER_BASE_URL="https://your-router.example.com/v1"
+```
 
-9Router documents `GET /v1/models` using an API key, returning a JSON object with a `data` array. Both a local gateway and a remote HTTPS instance can work.
+The endpoint can be given as the server root, `/v1` or `/v1/models`; the addon normalizes it to a `/v1` base URL. `NINEROUTER_BASE_URL` is used for **both scanning models and generating responses**.
 
-1. Ensure 9Router is running and create an API key in its dashboard. Set the key **in the Pi process environment**, not in the JSON config:
+Endpoint precedence is:
 
-   ```bash
-   export NINEROUTER_API_KEY="your-9router-api-key"
-   curl -fsS http://127.0.0.1:20128/v1/models -H "Authorization: Bearer $NINEROUTER_API_KEY"
-   ```
+1. Nonempty `NINEROUTER_BASE_URL` environment variable
+2. `nineRouter.baseUrl` in the saved JSON configuration
+3. Built-in default `http://127.0.0.1:20128/v1`
 
-2. Start Pi with the extension and run `/jev-models` → **9Router settings**. Use `http://127.0.0.1:20128/v1` for local 9Router, or your remote **HTTPS** endpoint. Configure the **environment variable name**, not its value. Default is `NINEROUTER_API_KEY`.
-3. Run `/jev-scan` (or **Scan 9Router models** inside `/jev-models`). Filter by provider prefix or name, and select individual models; batch import requires confirmation and is capped at 30 new models per scan filter.
-4. Configure each imported model's specialty, avoidance criteria, cost tier (relative preference, **not** 9Router billing), reasoning/vision support and context/output token limits. Unverified metadata defaults to text-only and reasoning off. Set the correct capabilities before relying on them.
-5. Enable routing and select the virtual model `jev-manager/auto` from `/model`, or run `/jev-test your task` before switching.
+In `/jev-models` the active URL is marked `[env]` when an environment override is set. To change the endpoint in that case, change the environment variable and **restart Pi**; editing the saved URL does not override it.
 
-A 9Router model `cx/deepseek-chat` is **not** registered as `cx` provider. It becomes `jev-9router/cx/deepseek-chat`; this preserves 9Router's original model ID while keeping the Pi provider namespace separate. 9Router routes generation requests to its OpenAI-compatible `/v1/chat/completions` endpoint.
+The file `.env.example` is a reference only. **Pi does not automatically load `.env`.** Export the variables or source your local file before starting Pi. Never commit actual keys to Git.
 
-**Important:** `/v1/models` is a discovery endpoint, **not** a proof that the model currently has quota, valid credentials, chat capability, tool-calling support, image support or accurate pricing. Some 9Router versions may expose every upstream model rather than only the manually curated dashboard list. Always select models deliberately and validate them with a real Pi test task. Jev only considers imported models that Pi reports as available and authenticated.
+#### Check 9Router before opening Pi
 
-**Security:** Remote endpoints should use HTTPS. The scanner sends `Authorization: Bearer` exclusively to the configured endpoint, rejects redirects, has a 10-second timeout and never saves keys. A 401 means the router rejected the configured key. If 9Router runs in Docker or on a VPS, `localhost` must refer to an address reachable **from the Pi process**, not the router's container. The Pi virtual-model router still sends your task text to Jev when routing is enabled.
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $NINEROUTER_API_KEY" \
+  "$NINEROUTER_BASE_URL/models"
+```
 
-**When Pi already uses 9Router:** the extension intentionally registers the scanned/imported models under `jev-9router` instead of overwriting the existing Pi provider `9router`. Both may appear in `/model`; only the models you enable in `/jev-models` are Jev candidates.
-
-### Configuration example
+Expected response shape (illustrative):
 
 ```json
 {
-  "nineRouter": {
-    "baseUrl": "http://127.0.0.1:20128/v1",
-    "apiKeyEnv": "NINEROUTER_API_KEY"
-  }
+  "data": [
+    { "id": "cc/example-model", "object": "model" }
+  ]
 }
 ```
 
-This is an excerpt; the full configuration also includes `version`, `classifier`, `models` and the routing policy. Use the accompanying `jev-model-manager.example.json` for a complete example.
+A successful model listing confirms that discovery is reachable; it **does not guarantee** that each model supports chat, tools, vision, or has remaining quota. If you use a different API key environment variable name, change it via `/jev-models` → **9Router settings**; the default is `NINEROUTER_API_KEY`.
+
+### 4. Scan and import models from 9Router
+
+With the extension loaded in Pi:
+
+1. Enter `/jev-scan`, or open `/jev-models` → **Scan 9Router models**.
+2. Use **Filter** to search by model name or model ID, such as `claude`, `deepseek` or a provider prefix.
+3. Select individual models to import **or** choose **Import all ... new matching models** (up to **30** new models per filtered batch; confirmation required).
+4. In the per-model editor, review the settings before leaving. Repeat for the models you actually want Jev to choose between.
+
+The scan UI shows at most 60 matching entries at a time; narrow the filter to find the ones you need. Re-running `/jev-scan` **preserves** your imported models and customized policies; it does not delete models missing from the next response.
+
+9Router model IDs keep their original model ID under a separate Pi provider:
+
+| 9Router model ID | Imported Pi model key |
+| --- | --- |
+| `cc/example-model` | `jev-9router/cc/example-model` |
+| `cx/deepseek-chat` | `jev-9router/cx/deepseek-chat` |
+
+Importing a model does **not** make it the active Pi model; you must configure routing and then select the virtual model in step 6.
+
+### 5. Define model capabilities and routing policy
+
+Open `/jev-models`. Each imported model has an editable profile:
+
+| Field | Purpose |
+| --- | --- |
+| **Enabled** | Include or exclude this model from Jev routing candidates |
+| **Display name** | Friendly label in the manager |
+| **Specialty** | Tasks this model is good at, e.g. routine implementation, architecture, code review |
+| **Avoid** | Tasks that should generally go to another model |
+| **Cost** | Relative `budget` / `balanced` / `premium` preference, **not live 9Router prices** |
+| **Thinking** | Preferred Pi thinking effort for this model |
+| **Reasoning / Vision** | Actual capabilities for imported 9Router models; verify them yourself |
+| **Context / Output limits** | Model-specific limits for imported 9Router models; avoid guessing |
+
+For example, you could keep one model for straightforward coding, one for complex debugging, and one for architecture. Use realistic strengths and exclusions rather than declaring every model “best at everything.”
+
+In the **main** `/jev-models` menu:
+
+1. Set **Fallback** to an enabled model that Pi can actually access.
+2. Set **Minimum probability** (default **0.43**, range `0`–`1`). Below this threshold, Jev uses the fallback.
+3. Change **Routing** from `OFF` to `ON` (it starts OFF deliberately).
+4. Choose **Mode**:
+   - `auto`: Jev's eligible, sufficiently confident selection is used for execution.
+   - `observe`: Jev still evaluates the task, but Pi executes it with the **fallback model**. This is useful for evaluating decisions safely.
+
+Only **enabled, available and authenticated** Pi models in scope are eligible. If no eligible model exists, the virtual model cannot route. Candidate lists should remain focused; importing everything is usually counterproductive.
+
+### 6. Activate automatic model selection
+
+In Pi:
+
+1. Run `/model`.
+2. Select **Jev • Auto Model Manager** (key: `jev-manager/auto`).
+3. Submit a normal task, for example:
+
+   `Implement a Gutenberg custom block with inspector controls and tests.`
+
+If **Routing = ON** and **Mode = auto**, the extension classifies the task through Jev and dispatches the next user turn to a matching physical model. Tool continuations and retries keep the same selected model instead of switching mid-turn.
+
+If you leave Pi on an ordinary physical model in `/model`, the Jev virtual router is **not** active even when Routing is ON.
+
+### 7. Test and inspect your routing decisions
+
+| Command | What it does |
+| --- | --- |
+| `/jev-models` | Edit models, 9Router settings, fallback, confidence and routing mode |
+| `/jev-scan` | List/filter/import models from 9Router |
+| `/jev-test <task>` | Ask Jev for a **dry-run** decision; does not change the active Pi model |
+| `/jev-status` | Show enabled/mode state, candidate count, fallback and latest real routing decision |
+| `/model` | Select the virtual `jev-manager/auto` model |
+| `/reload` | Reload a globally installed extension after updating the extension files |
+
+Try a few different tasks:
+
+```text
+/jev-test Fix a button alignment issue in CSS
+/jev-test Design a multi-tenant GraphRAG architecture
+/jev-test Review the authentication flow for security problems
+/jev-status
+```
+
+The reported probability is Jev's choice confidence, not a measured accuracy guarantee. The dry run may call TypeSafe even when automatic routing is currently OFF. It never switches the active Pi model by itself.
+
+### 8. Daily workflow
+
+After initial setup, the typical flow is:
+
+```text
+Start Pi
+   ↓
+/model → jev-manager/auto
+   ↓
+Submit your coding task
+   ↓
+Jev categorizes the task and suggests an eligible model
+   ↓
+Policy checks availability + confidence + fallback
+   ↓
+Pi runs that model for the turn (sticky through tool continuations)
+   ↓
+/jev-status to inspect the last decision
+```
+
+Re-run `/jev-scan` only when you want to discover newly added 9Router models. To tune selection quality, edit the models' **Specialty**, **Avoid**, **Cost**, and **Fallback** in `/jev-models`. You can switch to `observe` to assess routing choices before enabling full automatic dispatch.
+
+### Troubleshooting
+
+| Symptom | Check / fix |
+| --- | --- |
+| `/jev-models` or `/jev-scan` is unknown | Confirm `pi -e ./index.ts` launched successfully, or that the extension is installed globally and reloaded |
+| `Missing NINEROUTER_API_KEY` | Export the key in the same environment that launches Pi; see `.env.example` |
+| 9Router HTTP `401` | Verify the key, endpoint and access permissions; test with `curl` above |
+| Cannot reach 9Router / scan timeout | Verify `NINEROUTER_BASE_URL`, reachability, HTTPS/TLS and reverse-proxy path. `localhost` inside Docker or on a remote VPS may not be the same host as Pi |
+| 9Router URL in TUI won't change | `NINEROUTER_BASE_URL` overrides the JSON setting; change the environment variable and restart Pi |
+| Model appears in the scan but calls fail | `/v1/models` does not prove the selected model is functional, within quota, chat-capable or tool-capable; test the physical model directly |
+| Jev selects fallback every time | Check Routing is ON, at least two enabled/available candidates, `TYPESAFE_API_KEY`, classifier availability, and Minimum probability |
+| `/jev-test` works but tasks do not auto-route | Use `/model` and choose `jev-manager/auto`; confirm **Mode = auto** rather than `observe` |
+| No eligible authenticated physical models | Check Pi provider login / credentials, imported model registration, model Enabled switches and scope filters |
+| Model list after rescanning looks unchanged | Scanning is non-destructive: it does not remove imported models or reset their profiles |
+
+**Privacy and limits:** Jev receives task text when classification runs. The extension currently classifies the **last user text** (not the entire repository), and does not autonomously switch models for sub-tasks during a single turn. The current 9Router transport is `openai-completions`; verify capability/format support before importing unusual upstream model IDs. Generation failures do not automatically fail over to a different model.
 
 ## Configuration
 
