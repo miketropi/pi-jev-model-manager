@@ -10,7 +10,7 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 - A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
-- Explicit `/jev-plan`, `/jev-implement`, `/jev-debug`, `/jev-review`, `/jev-research`, `/jev-write`, `/jev-explain` and `/jev-auto` commands with mode-specific model assignment and read-only planning safeguards.
+- Explicit `/jev-plan`, `/jev-implement`, `/jev-qa`, `/jev-debug`, `/jev-review`, `/jev-research`, `/jev-write`, `/jev-explain` and `/jev-auto` commands with mode-specific model assignment and read-only planning safeguards.
 - `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, `/jev-on`, and `/jev-mascot` for routing, health and TUI display controls.
 - `/jev-scan` to discover models from a 9Router OpenAI-compatible API and import **selected** model IDs.
 - Native `/jev-models` menu contains **9Router settings** and **Scan 9Router models**.
@@ -178,6 +178,56 @@ This is a workflow guard rather than an OS/network sandbox. Public URL validatio
 **No arguments?** Running `/jev-plan` alone enters read-only planning mode; your next normal message is treated as a planning request. Likewise, `/jev-implement` without arguments switches to implementation mode without sending a new prompt. With arguments, the command submits the task to Pi as a user turn. These names are deliberately prefixed (`/jev-plan` rather than `/plan`) to avoid conflicts with other Pi extensions and prompt templates.
 
 **Routing policy:** For explicit `Prefer` or `Force` rules, Jev chooses the configured eligible model without classifying the task again. For `Auto` rules, Jev can still select the physical model, but the chosen workflow phase remains explicit. Use `/jev-tasks` to assign different models to Planning, Implementation, Review, Writing and more.
+
+## Skills & Approved Plan Handoff (v0.7.0)
+
+### Reuse the skills you already installed in Pi
+
+Jev **reuses Pi's own global, project-local and Pi-package skills**. It examines the skills Pi actually loaded for the current turn and suggests a small phase-matched set: no reinstallation, no copying into another directory, no automatic third-party downloads. The model loads relevant `SKILL.md` instructions on demand through the existing read tool, just like normal Pi skills.
+
+Suggested high-quality matches (when they are **already installed**) include the [Superpowers](https://github.com/obra/superpowers) workflow skills:
+
+| Jev command | Reused installed skills (examples) | Built-in fallback |
+|---|---|---|
+| `/jev-plan` | brainstorming, writing-plans | jev-plan-quality |
+| `/jev-implement` | executing-plans, test-driven-development, verification-before-completion | jev-implementation-quality |
+| `/jev-qa` | verification-before-completion, test-driven-development, playwright | jev-qa-quality |
+| `/jev-review` | requesting-code-review, code-review, security-review | jev-review-quality |
+| `/jev-debug` | systematic-debugging, verification-before-completion | Jev debugging instructions |
+
+Four **original** Jev quality-gate skills are bundled in this package at `skills/jev-*/SKILL.md`. They contain concise planning, execution, test and review checklists, not copied third-party skills. When this repo is installed as a Pi package (`pi install git:github.com/miketropi/pi-jev-model-manager`), Pi auto-discovers them from the package manifest (`pi.skills`). Existing global skills still take priority in Jev's recommendations. If you manually copy individual extension files instead, also install the `skills/` folder or rely on your already-installed global skills.
+
+Use `/jev-skills` to inspect which appropriate skills Pi has actually loaded for each phase. Optional external skill library: `pi install git:github.com/obra/superpowers`, then `/reload`. This is an optional **user action**, not a hidden install performed by Jev.
+
+### Plan is now a real session artifact
+
+After `/jev-plan [task]` completes and Pi has **settled** (including any retries), Jev:
+
+1. Collects the final planning response as formatted Markdown and saves it as a versioned, **session-scoped** document via Pi session entries (without editing project files).
+2. Publishes the Markdown in the Pi conversation and shows a small plan summary above the editor.
+3. Opens a native decision menu: **View / edit full plan**, **Implement now (approve plan)**, **Refine with AI**, **Keep plan for later**, **Cancel**.
+4. Full-plan review/edit opens Pi's multi-line editor. Saving a change increments the plan version. **Implement now** marks that version approved, changes to `implement` phase, restores writable tools and submits the complete approved plan as the next task.
+5. **Refine with AI** stays in strict read-only Plan Mode and creates a new draft for review. **Keep for later** and **Cancel** never start implementation.
+
+Reopen the saved plan at any time with `/jev-plan-open`, including after `/reload` or resuming the same session. You can change phases manually via `/jev-qa` and `/jev-review` after implementation. Plans are stored in the Pi session, **not silently written to the repository**.
+
+```text
+/jev-tasks         # Assign Plan / Implement / QA / Review models
+/jev-skills        # Inspect which global and bundled skills Pi loaded
+/jev-plan Design a Gutenberg donation block, with validation criteria
+# Pi researches, asks questions if needed, returns a Markdown plan.
+# Jev shows plan and action menu after the agent settles.
+
+# Choose: View / edit full plan
+# Choose: Implement now (approve plan)
+# Pi switches to Implementation and executes the approved plan.
+
+/jev-qa Verify the donation block, run tests and report evidence
+/jev-review Review changes, risks and regression coverage
+/jev-plan-open     # Review or revise the latest plan again
+```
+
+**Important limits:** The final plan is based on the model's Markdown response; Jev cannot guarantee every heading is present, but provides a structured planning contract. The plan-action menu requires Pi interactive UI. In noninteractive modes, the plan is saved but not approved automatically. Skill matching is advisory — it does not guarantee the model followed a skill. Avoid adopting untrusted third-party skill packs without reviewing their instructions.
 
 ## How to use
 

@@ -10,6 +10,8 @@ import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, 
 import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
 import { registerPlanningTools } from "./planning-tools.ts";
+import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing.ts";
+import { PLAN_ENTRY, PLAN_MESSAGE, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
@@ -229,6 +231,7 @@ async function choose(
             implement: "Write or change application code",
             debug: "Diagnose and fix a defect",
             review: "Review existing code, tests, or security",
+            qa: "Run and evaluate tests, acceptance checks and regressions",
             research: "Investigate unfamiliar APIs, concepts, or libraries",
             explain: "Explain a concept without editing code",
             write: "Create or draft a blog post, article, tutorial, documentation or marketing content",
@@ -809,6 +812,68 @@ export default function (pi: ExtensionAPI) {
   let lastDecision: Decision | undefined;
   let workflowTask: TaskType | undefined;
   let toolsBeforeStrictPhase: string[] | undefined;
+  let planDocument: PlanDocument | undefined;
+  let planRunActive = false;
+  let pendingPlanText: string | undefined;
+
+  function savePlan(document: PlanDocument, ctx: ExtensionContext): void {
+    planDocument = document;
+    pi.appendEntry(PLAN_ENTRY, document);
+    if (ctx.mode === "tui") ctx.ui.setWidget("jev-plan-summary", planPreview(document));
+    // Plan content appears as a formatted Markdown message and remains in the session.
+    pi.sendMessage({ customType: PLAN_MESSAGE,
+      content: document.markdown, display: true,
+      details: { version: document.version, status: document.status } },
+      { triggerTurn: false });
+  }
+
+  async function openPlan(ctx: ExtensionContext): Promise<void> {
+    if (!planDocument) {
+      ctx.ui.notify("No saved Jev plan yet. Run /jev-plan first.", "warning");
+      return;
+    }
+    if (!ctx.hasUI || !ctx.ui.select) {
+      ctx.ui.notify("Plan saved in session. Open the session in Pi TUI to review/edit.", "info");
+      return;
+    }
+    for (let step = 0; step < 12; step++) {
+      const choice = await ctx.ui.select(
+        `Jev Plan v${planDocument.version} · ${planDocument.status} · next action`,
+        ["View / edit full plan", "Implement now (approve plan)",
+         "Refine with AI", "Keep plan for later", "Cancel"],
+      );
+      if (!choice || choice === "Keep plan for later" || choice === "Cancel") return;
+      if (choice === "View / edit full plan") {
+        const edited = await ctx.ui.editor("Jev Plan · Markdown (edit to revise)",
+          planDocument.markdown);
+        if (typeof edited === "string" && edited.trim() && edited.trim() !== planDocument.markdown) {
+          savePlan(nextPlan(edited, planDocument), ctx);
+          ctx.ui.notify("Plan revised and saved in this Pi session.", "info");
+        }
+      } else if (choice === "Refine with AI") {
+        const change = await ctx.ui.editor("What should change in the plan?", "");
+        if (change?.trim()) {
+          // Switch back to Plan to enforce no project writes during revision.
+          if (workflowTask !== "plan") await runWorkflowCommand("plan", "", ctx);
+          if (workflowTask === "plan")
+            pi.sendUserMessage("Revise the existing Jev plan based on this feedback. Do not implement.\nCurrent plan:\n"+
+              planDocument.markdown+"\nFeedback:\n"+change.trim(), {deliverAs:"followUp"});
+        }
+        return;
+      } else if (choice === "Implement now (approve plan)") {
+        const approved = { ...planDocument, status: "approved" as const };
+        savePlan(approved, ctx);
+        await runWorkflowCommand("implement", "", ctx);
+        if (workflowTask !== "implement") {
+          ctx.ui.notify("Could not switch to Implementation; approved plan remains saved.", "error");
+          return;
+        }
+        pi.sendUserMessage(implementationHandoff(approved), {deliverAs:"followUp"});
+        return;
+      }
+    }
+  }
+
 
   function changeWorkflow(task: TaskType | undefined): void {
     const wasStrict = isStrictPhase(workflowTask);
@@ -844,6 +909,11 @@ export default function (pi: ExtensionAPI) {
   const health = new ModelHealth();
 
   pi.on?.("session_start", (_event, ctx) => {
+    planRunActive = false;
+    pendingPlanText = undefined;
+    planDocument = latestPlanFromBranch(ctx.sessionManager?.getBranch?.() ?? []);
+    if (ctx.mode === "tui") ctx.ui.setWidget("jev-plan-summary",
+      planDocument ? planPreview(planDocument) : undefined);
     // Restore phase when resuming/reloading; session-specific entries avoid global leakage.
     workflowTask = undefined;
     toolsBeforeStrictPhase = undefined;
@@ -876,7 +946,10 @@ export default function (pi: ExtensionAPI) {
     });
   });
   // Mark the character ready at the end of a turn, retaining the last routed model.
-  pi.on?.("agent_end", (_event, ctx) => {
+  pi.on?.("agent_end", (event, ctx) => {
+    if (workflowTask === "plan" && planRunActive) {
+      pendingPlanText = extractPlanText(event.messages) ?? pendingPlanText;
+    }
     const config = readConfig();
     updateJevling(ctx, config, {
       mood: config.enabled ? "ready" : "disabled",
@@ -885,6 +958,22 @@ export default function (pi: ExtensionAPI) {
         ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model
         : undefined,
     });
+  });
+
+  pi.on?.("agent_start", () => {
+    planRunActive = workflowTask === "plan";
+    pendingPlanText = undefined;
+  });
+
+  // Only run the interactive handoff after Pi has fully settled, not during retries.
+  pi.on?.("agent_settled", async (_event, ctx) => {
+    if (!planRunActive) return;
+    planRunActive = false;
+    const text = pendingPlanText;
+    pendingPlanText = undefined;
+    if (!text || workflowTask !== "plan") return;
+    savePlan(nextPlan(text, planDocument), ctx);
+    if (ctx.mode === "tui" && ctx.hasUI) await openPlan(ctx);
   });
 
   // Track real provider outcomes instead of trusting the static Pi catalog.
@@ -904,7 +993,16 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("before_agent_start", (event) => {
     if (!workflowTask) return;
-    return { systemPrompt: event.systemPrompt + "\n\n" + instructionsForTask(workflowTask) };
+    const skills = Array.isArray(event.systemPromptOptions?.skills)
+      ? event.systemPromptOptions.skills as LoadedSkill[] : [];
+    let instructions = instructionsForTask(workflowTask) + "\n\n" +
+      skillGuidance(workflowTask, skills);
+    if (workflowTask === "plan") {
+      instructions += "\n\nPLAN DOCUMENT REQUIREMENT: On finishing the research, output a complete self-contained Markdown implementation plan. Include Goal, Evidence & assumptions, Decisions & tradeoffs, Numbered steps, Files to touch, Validation, Risks and Acceptance criteria. Do not implement it. Jev will save the final answer and ask the user whether to review, refine, keep or implement.";
+    } else if (workflowTask === "implement" && planDocument?.status === "approved") {
+      instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Check for deviations and do not substitute an older draft.";
+    }
+    return { systemPrompt: event.systemPrompt + "\n\n" + instructions };
   });
   pi.on?.("user_bash", (event) => {
     if (!isStrictPhase(workflowTask)) return;
@@ -1194,6 +1292,30 @@ export default function (pi: ExtensionAPI) {
       handler: async (args, ctx) => { await runWorkflowCommand(task, args, ctx); },
     });
   }
+  pi.registerCommand("jev-skills", {
+    description: "Inspect Pi-discovered global/project skills used for each Jev workflow phase",
+    handler: async (_args, ctx) => {
+      const loaded = ctx.getSystemPromptOptions?.().skills as LoadedSkill[] | undefined ?? [];
+      if (!loaded.length) {
+        ctx.ui.notify("No skills currently reported by Pi. Install global skills or install Jev as a Pi package with bundled skills, then /reload.", "warning");
+        return;
+      }
+      const task = await ctx.ui.select("Jev · Skills for phase", [
+        "plan","implement","qa","review","debug","research","write","explain",
+      ]) as TaskType | undefined;
+      if (!task) return;
+      const recommended = matchingSkills(task, loaded);
+      ctx.ui.notify(recommended.length
+        ? "Pi-discovered skills for "+task+": "+recommended.map(s=>s.name).join(", ")+". The agent reads relevant SKILL.md on demand."
+        : "No recommended skill for "+task+" is loaded. The built-in Jev phase quality gate still applies.", "info");
+    },
+  });
+
+  pi.registerCommand("jev-plan-open", {
+    description: "Review, edit or approve the latest saved Jev plan and choose what happens next",
+    handler: async (_args, ctx) => { await openPlan(ctx); },
+  });
+
   pi.registerCommand("jev-auto", {
     description: "Leave explicit task phase and restore automatic Jev routing / tools",
     handler: async (_args, ctx) => {

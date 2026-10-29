@@ -10,7 +10,7 @@ import { defaultTaskRules } from "../task-routing.ts";
 
 test("explicit commands and strict read-only policy", () => {
   assert.deepEqual(Object.values(WORKFLOW_COMMANDS).sort(), [
-    "jev-debug","jev-explain","jev-implement","jev-plan","jev-research","jev-review","jev-write",
+    "jev-debug","jev-explain","jev-implement","jev-plan","jev-qa","jev-research","jev-review","jev-write",
   ]);
   assert.deepEqual(toolsForPhase(["read","bash","grep","edit","write","ls","Agent"],"plan"),
     ["read","bash","grep","ls"]);
@@ -25,6 +25,7 @@ test("explicit commands and strict read-only policy", () => {
   assert.equal(canUseTool("plan","jev_ask_user",{}),true);
   assert.equal(canUseTool("review","edit"),false);
   assert.equal(canUseTool("implement","edit"),true);
+  assert.equal(canUseTool("qa","bash",{command:"npm test"}),true);
   assert.match(instructionsForTask("plan"),/Do not implement/);
   const rules=defaultTaskRules();
   rules.plan={mode:"force",model:"test/planner"};

@@ -3,7 +3,7 @@ import { TASK_TYPES, defaultTaskRules, filterModels, type ModelOption, type Task
 
 export const TASK_LABELS: Record<TaskType, string> = {
   plan: "Planning & Architecture", implement: "Implementation", debug: "Debugging",
-  review: "Code Review", research: "Research", explain: "Explanation", write: "Writing & Content",
+  review: "Code Review", qa: "Quality Assurance & Testing", research: "Research", explain: "Explanation", write: "Writing & Content",
 };
 
 /** A bounded searchable chooser instead of a potentially huge Pi select() list. */

@@ -6,7 +6,7 @@ import {
 import { chooseSearchableModel, configureTaskRules } from "../task-ui.ts";
 
 test("task rules migrate legacy JSON config and reject invalid model policies", () => {
-  assert.equal(TASK_TYPES.length, 7);
+  assert.equal(TASK_TYPES.length, 8);
   assert.ok(TASK_TYPES.includes("write"));
   assert.equal(normalizeTaskRules({write: {mode:"force",model:"provider/writer"}}).write.model, "provider/writer");
   const original = defaultTaskRules();

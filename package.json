@@ -1,13 +1,14 @@
 {
   "name": "pi-jev-model-manager-mvp",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Jev-based virtual model routing with native Pi model management dialogs",
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "skills": ["./skills"]
   },
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts"
