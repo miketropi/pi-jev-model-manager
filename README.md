@@ -431,6 +431,16 @@ After a child session starts, its own session JSONL stores the approved plan and
 
 **Scope:** Session isolation separates *conversation context*, not working-tree files. Both sessions still work in the same project directory; this does not create a Git worktree or branch. A child session can be revisited via Pi's native `/resume`. The feature uses the documented Pi session API and has mocked end-to-end tests, but has not yet been executed on your local Pi build.
 
+## Fix: Jev Routing Stays ON in New Implementation Sessions (v0.9.2)
+
+A newly created Pi session could show **JEV ○ standby · Inactive** because `appendModelChange("jev-manager","auto")` writes session history, but may not select Pi's **active runtime model**. That caused an approved Auto Implementation to start with the wrong model and never enter Jev's intended pipeline.
+
+Now, **only for an explicitly linked new Jev Implementation Session** (not ordinary Pi sessions), the replacement extension's async `session_start` handler calls Pi's `setModel(jev-manager/auto)` and restores the Jev ON/auto routing configuration. It updates the robot using the selected virtual model instead of the stale pre-switch session context. The first implementation prompt is sent **only after** the new-session runtime confirms Jev routing is active.
+
+If Pi cannot select the virtual model (missing provider/credentials or incompatible Pi build), the new session remains open but **no implementation starts**. In Auto mode, the pipeline is marked paused with a reason. Resolve the model issue with `/jev-on`, then run `/jev-pipeline-resume`; for manual mode use `/jev-plan-open` or `/jev-implement` with an explicit task. This prevents unexpectedly spending tokens on a different model.
+
+The normal `/jev-auto` and manual physical-model selections remain respected in unrelated Pi sessions; the new activation applies to the new child created by an approved Jev plan. No user interaction is required during a successful new-session handoff. Regression tests cover child startup on a physical model and in observe mode, plus fail-closed behavior when Pi rejects `setModel()`.
+
 ## How to use
 
 This guide follows the actual Pi extension UI and is recommended for first-time users running Pi with a **9Router proxy**. No separate MCP server is required.

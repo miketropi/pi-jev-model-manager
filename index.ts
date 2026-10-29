@@ -967,7 +967,14 @@ export default function (pi: ExtensionAPI) {
           sm.appendSessionInfo(title);
         },
         withSession:async (fresh:any)=>{
-          // Never touch the stale command ctx / pi instance here.
+          // The replacement runtime must have selected the actual virtual
+          // model, not merely recorded model_change in session JSONL.
+          // Fail closed: no Implementation prompt can run on a stray model.
+          if (!isRoutingActive(readConfig(),fresh)) {
+            fresh.ui.notify("Jev session handoff is NOT active; Implementation was not started. " +
+              "Run /jev-on, then /jev-implement (or /jev-pipeline-resume).", "error");
+            return;
+          }
           await fresh.sendUserMessage(plan);
         },
       });
@@ -1195,7 +1202,7 @@ export default function (pi: ExtensionAPI) {
 
   const health = new ModelHealth();
 
-  pi.on?.("session_start", (event, ctx) => {
+  pi.on?.("session_start", async (event, ctx) => {
     robotView = undefined;
     robotAnimator?.stop();
     implementationHandoffPending = false;
@@ -1246,14 +1253,35 @@ export default function (pi: ExtensionAPI) {
         progressToolInjected=true;
       }
     }
+    // An appendModelChange() entry is session history, not an active Pi
+    // runtime model selection. Newly linked sessions explicitly selected by
+    // the user MUST activate Jev after Pi replaces the extension instance.
+    // Do not hijack ordinary user-created sessions.
+    let selectedAtHandoff = false;
+    if (initialHandoff && workflowTask === "implement") {
+      selectedAtHandoff = await activateJev(pi, ctx);
+      if (!selectedAtHandoff) {
+        if (autoPipeline?.status === "running") {
+          savePipeline({...autoPipeline, status:"paused",
+            reason:"Jev routing could not activate in the new Implementation Session"}, ctx);
+        }
+        ctx.ui.notify("Jev routing could not activate in the new session. " +
+          "Implementation will NOT start with an unrelated model. Run /jev-on, " +
+          "then /jev-implement or /jev-pipeline-resume.", "error");
+      }
+    }
     const config = readConfig();
     showPlanSummary(ctx, workflowTask === "plan" && planSummaryVisible, false);
     showProgress(ctx);
     if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
       workflowTask ? `Jev ${workflowTask.toUpperCase()}${isStrictPhase(workflowTask) ? " · READ ONLY" : ""}` : undefined);
-    updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
-    // Do not hijack sessions that intentionally selected a physical model.
-    if (ctx.mode === "tui" && config.enabled && !isJevSelected(ctx.model)) {
+    // ctx.model can be a snapshot taken before pi.setModel(); do not draw a
+    // false "Inactive" widget after a successful child-session activation.
+    const displayModel = selectedAtHandoff
+      ? ctx.modelRegistry.find(ROUTER_PROVIDER, ROUTER_ID) ?? ctx.model : ctx.model;
+    const displayCtx = selectedAtHandoff ? {...ctx, model:displayModel} : ctx;
+    updateJevling(displayCtx, config, { mood: config.enabled ? "ready" : "disabled" });
+    if (ctx.mode === "tui" && config.enabled && !isJevSelected(displayCtx.model)) {
       ctx.ui.notify("Jev is configured but INACTIVE: Pi is using a physical model. Run /jev-on to activate routing.", "info");
     }
   });

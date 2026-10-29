@@ -1,13 +1,17 @@
-import test from "node:test";
+import test, {after} from "node:test";
 import assert from "node:assert/strict";
-import {mkdtempSync,writeFileSync,rmSync} from "node:fs";
+import {mkdtempSync,writeFileSync,readFileSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {defaultTaskRules} from "../task-routing.ts";
 import {SESSION_ORIGIN_ENTRY} from "../implementation-session.ts";
 import {PIPELINE_ENTRY} from "../auto-pipeline.ts";
-test("Plan approval prepares a safe command and new Pi child receives only approved context",async()=>{
- const dir=mkdtempSync(join(tmpdir(),"jev-child-session-"));
+const sharedDir=mkdtempSync(join(tmpdir(),"jev-child-session-shared-"));
+after(()=>rmSync(sharedDir,{recursive:true,force:true}));
+for(const rejectModel of [false,true])test(
+  "Plan handoff "+(rejectModel?"blocks kickoff on model rejection":"activates Jev before kickoff"),
+  async()=>{
+ const dir=sharedDir;
  const prior=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=dir;
  const models=["planner","builder","tester","reviewer"].map(id=>({provider:"test",id,api:"openai-completions"}));
  const virt={provider:"jev-manager",id:"auto",api:"pi-virtual"};
@@ -64,6 +68,7 @@ test("Plan approval prepares a safe command and new Pi child receives only appro
    assert.equal(origin.mode,"auto");
    assert.equal(entries.find(e=>e.customType===PIPELINE_ENTRY)?.data.phase,"implement");
    const childEvents={},childCommands={},childTools={};
+   const childNotices=[],childWidgets=[],modelSelections=[];
    let childActive=["read","write","bash","edit","grep","find","ls"];
    const childPi={registerProvider(){},unregisterProvider(){},registerVirtualModel(){},
     registerTool:t=>childTools[t.name]=t,registerCommand:(n,c)=>childCommands[n]=c,
@@ -71,21 +76,51 @@ test("Plan approval prepares a safe command and new Pi child receives only appro
     setActiveTools:x=>childActive=x,getAllTools:()=>Object.values(childTools),
     appendEntry:(type,data)=>entries.push({type:"custom",customType:type,data}),
     sendUserMessage(){throw Error("Use fresh session context, never stale Pi");},
-    sendMessage(){},setModel:async()=>true};
-   const childCtx={mode:"tui",hasUI:true,model:virt,modelRegistry,scopedModels:[],
+    sendMessage(){},setModel:async m=>{
+      modelSelections.push(m.provider+"/"+m.id);
+      if(rejectModel)return false;
+      childCtx.model=m;
+      return true;
+    }};
+   const childCtx={mode:"tui",hasUI:true,model:models[0],modelRegistry,scopedModels:[],
     sessionManager:{getBranch:()=>entries,getSessionId:()=>"child-id",
       getSessionFile:()=>"/home/user/.pi/agent/sessions/child.jsonl"},
-    ui:{setWidget(){},setStatus(){},notify(){}}
+    ui:{setWidget:(...x)=>childWidgets.push(x),setStatus(){},
+      notify:(...x)=>childNotices.push(x)}
    };
+   // Simulate inherited standby / observe configuration at the moment
+   // Pi switches from Planning into the new Implementation runtime.
+   writeFileSync(join(dir,"jev-model-manager.json"),
+     JSON.stringify({...cfg,enabled:false,mode:"observe"}));
    ext(childPi);
    await childEvents.session_start({reason:"new"},childCtx);
+   assert.deepEqual(modelSelections,["jev-manager/auto"]);
+   if(!rejectModel){
+     assert.equal(childCtx.model.provider,"jev-manager",
+       "runtime model must change, not just session JSONL");
+     const activated=JSON.parse(readFileSync(join(dir,"jev-model-manager.json"),"utf8"));
+     assert.equal(activated.enabled,true,"new child must enable routing");
+     assert.equal(activated.mode,"auto","new child must leave observe mode");
+     assert.ok(childWidgets.some(([name,value])=>name==="jev-manager:mascot" && value));
+     assert.equal(childNotices.some(([msg])=>String(msg).includes("INACTIVE")),false);
+   }
    assert.ok(childActive.includes("jev_progress"));
    childState={childEvents,childCtx,childCommands,childTools,entries,childActive,
-     prompt:[]};
+     notices:childNotices,prompt:[]};
    await options.withSession({...childCtx,sendUserMessage:async text=>childState.prompt.push(text)});
    return {cancelled:false};
   };
   await parentCommands["jev-implement-session"].handler("auto",parentCtx);
+  if(rejectModel){
+    assert.equal(childState.prompt.length,0,
+      "Implementation must never run when active model is not Jev");
+    assert.equal(childState.childCtx.model.provider,"test");
+    assert.equal(childState.entries.filter(e=>e.customType===PIPELINE_ENTRY).at(-1)?.data.status,
+      "paused","Failed activation must pause auto pipeline");
+    assert.ok(childState.notices.some(([text])=>
+      String(text).includes("will NOT start") || String(text).includes("was not started")));
+    return;
+  }
   assert.equal(childState.prompt.length,1);
   assert.match(childState.prompt[0],/IMPLEMENTATION REQUIRED/);
   assert.equal(childState.entries.find(e=>e.customType==="jev-workflow-phase").data.task,"implement");
@@ -99,6 +134,5 @@ test("Plan approval prepares a safe command and new Pi child receives only appro
  }finally{
   if(prior===undefined)delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR=prior;
-  rmSync(dir,{recursive:true,force:true});
  }
 });
