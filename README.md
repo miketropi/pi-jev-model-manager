@@ -5,6 +5,7 @@
 A reference Pi extension for automatic model choice via TypeSafe Jev with a native management UI.
 
 ## Features
+- Jevling Duck: an optional, softly animated terminal mascot with head wobble, blinking and wing wiggles, active only during agent runs.
 - A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
@@ -84,25 +85,27 @@ Pi's model catalog indicates configured/credentialed models, **not live provider
 
 **Limitations:** This is **observed, not guaranteed real-time availability**. Before a model has been called, its status is `unknown`; remote providers do not expose a universal free availability API. Automatic failover only happens at Pi's supported retry boundary, not after an arbitrary partially completed tool action. It cannot guarantee that the backup provider is healthy. Health history is in-memory and resets when Pi restarts or `/reload` runs. Independent Pi child processes have separate health caches unless a shared runner integration is added.
 
-## Jevling — Terminal Mascot (v0.5.1)
+## Jevling Duck — Animated TUI Companion (v0.6.1)
 
-Meet **Jevling**, a small, original terminal companion for Jev Model Manager. It lives in a dedicated widget **above Pi's editor**, without replacing the built-in header/footer or changing the agent's execution.
+The original terminal robot is now a tiny **duck** with a beak, wing and feet. It still occupies just **three lines** above the Pi editor and preserves the task/model status on the right.
 
 ```text
-  ╭─◇─╮   JEV  ◆ ROUTING
-  │•ᴗ•│   implement · your-selected-model
-  ╰─┬─╯   /jev-mascot · change display
+   _(• )>    JEV  ◆ ROUTING
+ <( ᴗ  )     implement · your-selected-model
+   ^^ ^^     /jev-mascot · display
 ```
 
-The mascot changes its expression and label across **ready**, **routing**, **provider failover** and **standby** states. It returns to ready when the agent turn finishes. It shows the last selected model, not real-time token-stream telemetry.
+While Pi is processing an agent turn, the duck occasionally **wobbles its head left/right**, **blinks** or **wiggles its wing**. Gestures are intentionally subtle and pseudo-random, with a 1.8–3.9s pause between small bursts and 230ms movement frames. The model/task text stays in the same terminal columns while the character moves.
 
-In Pi, run `/jev-mascot` or choose **TUI mascot** in `/jev-config` to select:
+The duck is static while Pi is idle, appears worried during model failover, and shows a sleepy face when routing is inactive. Animation runs **only in Pi TUI**, only while an agent is active and only when the virtual Jev router is selected. Timers are stopped on agent end, session switch, reload and shutdown. There are **no additional LLM calls, network requests, dependencies or image assets**.
 
-- **Mascot (default):** the compact three-line character shown above.
-- **Compact:** one-line badge (for small terminals).
-- **Off:** hides the widget entirely.
+Use `/jev-mascot` or `/jev-config` → **TUI mascot** to choose:
+- **Mascot (default)** — animated three-line duck.
+- **Compact** — single static duck badge for small terminals.
+- **Off** — hide the duck entirely.
+- **Duck animation: ON/OFF** — keep the three-line duck but disable motion.
 
-The preference is saved in `jev-model-manager.json` and survives restarts. Jevling requires Pi **TUI mode**; it does not render in RPC, JSON or print mode. It is static (no animation, timers, network calls, model tokens or extra prompts) and has its own namespaced widget key.
+Motion is enabled by default. Your choice is saved as `duckMotion` in `jev-model-manager.json`, alongside the existing `mascot` display setting. The duck has a bounded refresh rate and animation stops completely when disabled. Older configurations automatically receive the animated duck without modifying any routing or API-key settings.
 
 ## Activate routing in your Pi session (v0.5.2)
 

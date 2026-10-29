@@ -7,17 +7,18 @@ import {
   mascotLines, normalizeMascotStyle, cleanMascotText, MASCOT_WIDGET_KEY,
 } from "../mascot.ts";
 
-test("Jevling renders an original three-line mascot, compact glyph and disabled view", () => {
+test("Jevling duck renders a stable three-line mascot and compact/off states", () => {
   const ready = mascotLines("mascot", { mood: "ready" });
   assert.equal(ready.length, 3);
   assert.match(ready[0], /JEV.*READY/);
-  assert.match(ready[1], /•ᴗ•/);
+  assert.match(ready[0], /_\(• \)>/);
+  assert.match(ready[1], /<\( ᴗ  \)/);
   const recovery = mascotLines("mascot", { mood: "recovery", model: "Test Model" });
   assert.match(recovery[0], /RECOVERING/);
-  assert.match(recovery[1], /•﹏•/);
+  assert.match(recovery[1], /<\( ﹏  \)/);
   assert.match(recovery[1], /Test Model/);
   assert.equal(mascotLines("compact", { mood: "routing", task: "implement", model: "DeepSeek" }).length, 1);
-  assert.match(mascotLines("compact", { mood: "routing" })[0], /^◇ JEV/);
+  assert.match(mascotLines("compact", { mood: "routing" })[0], /^\(•\)> JEV/);
   assert.deepEqual(mascotLines("off", { mood: "routing" }), []);
 });
 test("mascot has safe defaults and strips terminal escape/control characters", () => {
@@ -67,6 +68,20 @@ test("Pi TUI shows mascot on session start; toggle modes persist, don't replace 
     style = "Mascot (3 lines)";
     await cmds["jev-mascot"].handler("", ctx);
     assert.equal(widgets.at(-1)?.[1]?.length, 3);
+
+    const configPath = join(dir, "jev-model-manager.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    writeFileSync(configPath, JSON.stringify({ ...config, enabled: true, mode: "auto", duckMotion: true }));
+    const activeCtx = { ...ctx, model: { provider: "jev-manager", id: "auto" } };
+    await events.agent_start({}, activeCtx);
+    assert.match(widgets.at(-1)?.[1]?.[0] ?? "", /ROUTING/);
+    style = "Duck animation: ON";
+    await cmds["jev-mascot"].handler("", activeCtx);
+    assert.equal(JSON.parse(readFileSync(configPath, "utf8")).duckMotion, false);
+    assert.equal(widgets.at(-1)?.[1]?.length, 3);
+    await events.agent_end({}, activeCtx);
+    assert.match(widgets.at(-1)?.[1]?.[0] ?? "", /READY/);
+    await events.session_shutdown({}, activeCtx);
 
     const before = widgets.length;
     await events.session_start({}, { ...ctx, mode: "rpc" });
