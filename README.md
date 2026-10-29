@@ -5,7 +5,8 @@
 A reference Pi extension for automatic model choice via TypeSafe Jev with a native management UI.
 
 ## Features
-- Jevling Duck: an optional, softly animated terminal mascot with head wobble, blinking and wing wiggles, active only during agent runs.
+- Plan/Review can perform read-only web research and open native user-choice menus without editing files.
+- Jevling robot: a compact static terminal mascot with no animations or timers.
 - A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
@@ -85,27 +86,25 @@ Pi's model catalog indicates configured/credentialed models, **not live provider
 
 **Limitations:** This is **observed, not guaranteed real-time availability**. Before a model has been called, its status is `unknown`; remote providers do not expose a universal free availability API. Automatic failover only happens at Pi's supported retry boundary, not after an arbitrary partially completed tool action. It cannot guarantee that the backup provider is healthy. Health history is in-memory and resets when Pi restarts or `/reload` runs. Independent Pi child processes have separate health caches unless a shared runner integration is added.
 
-## Jevling Duck — Animated TUI Companion (v0.6.1)
+## Jevling — Terminal Mascot (v0.5.1)
 
-The original terminal robot is now a tiny **duck** with a beak, wing and feet. It still occupies just **three lines** above the Pi editor and preserves the task/model status on the right.
+Meet **Jevling**, a small, original terminal companion for Jev Model Manager. It lives in a dedicated widget **above Pi's editor**, without replacing the built-in header/footer or changing the agent's execution.
 
 ```text
-   _(• )>    JEV  ◆ ROUTING
- <( ᴗ  )     implement · your-selected-model
-   ^^ ^^     /jev-mascot · display
+  ╭─◇─╮   JEV  ◆ ROUTING
+  │•ᴗ•│   implement · your-selected-model
+  ╰─┬─╯   /jev-mascot · change display
 ```
 
-While Pi is processing an agent turn, the duck occasionally **wobbles its head left/right**, **blinks** or **wiggles its wing**. Gestures are intentionally subtle and pseudo-random, with a 1.8–3.9s pause between small bursts and 230ms movement frames. The model/task text stays in the same terminal columns while the character moves.
+The mascot changes its expression and label across **ready**, **routing**, **provider failover** and **standby** states. It returns to ready when the agent turn finishes. It shows the last selected model, not real-time token-stream telemetry.
 
-The duck is static while Pi is idle, appears worried during model failover, and shows a sleepy face when routing is inactive. Animation runs **only in Pi TUI**, only while an agent is active and only when the virtual Jev router is selected. Timers are stopped on agent end, session switch, reload and shutdown. There are **no additional LLM calls, network requests, dependencies or image assets**.
+In Pi, run `/jev-mascot` or choose **TUI mascot** in `/jev-config` to select:
 
-Use `/jev-mascot` or `/jev-config` → **TUI mascot** to choose:
-- **Mascot (default)** — animated three-line duck.
-- **Compact** — single static duck badge for small terminals.
-- **Off** — hide the duck entirely.
-- **Duck animation: ON/OFF** — keep the three-line duck but disable motion.
+- **Mascot (default):** the compact three-line character shown above.
+- **Compact:** one-line badge (for small terminals).
+- **Off:** hides the widget entirely.
 
-Motion is enabled by default. Your choice is saved as `duckMotion` in `jev-model-manager.json`, alongside the existing `mascot` display setting. The duck has a bounded refresh rate and animation stops completely when disabled. Older configurations automatically receive the animated duck without modifying any routing or API-key settings.
+The preference is saved in `jev-model-manager.json` and survives restarts. Jevling requires Pi **TUI mode**; it does not render in RPC, JSON or print mode. It is static (no animation, timers, network calls, model tokens or extra prompts) and has its own namespaced widget key.
 
 ## Activate routing in your Pi session (v0.5.2)
 
@@ -129,7 +128,7 @@ Jevling now reports **STANDBY / Inactive · run /jev-on** when the extension is 
 
 If `/jev-on` reports no eligible models, import or enable models using `/jev-scan` or `/jev-models`. If your Pi build cannot programmatically select the virtual model, use `/model` directly.
 
-## Explicit Task Commands & Strict Plan Mode (v0.6.0)
+## Explicit Task Commands & Research-Friendly Plan Mode (v0.6.2)
 
 Choose the workflow phase intentionally, without relying on Jev to guess a task from free-form prose. Commands activate the `jev-manager/auto` virtual model for the current Pi session, and use the matching rule in `/jev-tasks`.
 
@@ -138,7 +137,7 @@ Choose the workflow phase intentionally, without relying on Jev to guess a task 
 | `/jev-plan [task]` | **Strict read-only planning**: analyze, explore, compare, create a numbered plan; never implement |
 | `/jev-implement [task]` | Implement code or execute a previously agreed plan; normal tools restored |
 | `/jev-debug [task]` | Diagnose and fix defects, then verify |
-| `/jev-review [task]` | **Read-only code review**: no edits, shell commands or subagent execution |
+| `/jev-review [task]` | **Read-only code review**: may research and inspect git; no writes or subagent execution |
 | `/jev-research [task]` | Gather evidence and compare approaches |
 | `/jev-write [task]` | Draft a blog post, documentation or other content |
 | `/jev-explain [task]` | Explain a concept without unnecessary modifications |
@@ -163,7 +162,14 @@ Choose the workflow phase intentionally, without relying on Jev to guess a task 
 # Return to Jev automatic classification.
 ```
 
-**Plan Mode is enforced at the tool layer**, not just by wording in the prompt. It temporarily limits Pi's active tool set to the built-in `read`, `grep`, `find` and `ls` tools (if installed). A `tool_call` guard blocks **all** other LLM tool executions including `bash`, `write`, `edit`, external tools and subagent spawns, even if another extension makes them active. User `!`/`!!` shell commands are also rejected during strict Plan and Review modes. **Plan Mode does not run tests**, because shell execution is disabled. It can describe the tests that should be run during Implementation.
+**Plan Mode enforces no-project-writes at the tool layer**, but allows useful research:
+
+- **Read source:** `read`, `grep`, `find`, `ls` plus tightly restricted `bash` for read-only commands such as `git log`, `git diff`, `rg` and `cat`. Shell operators, redirects, tests, package installs and modifying commands remain blocked.
+- **Live web research:** `jev_web_fetch` performs public HTTPS **GET only** with checked redirects, text/JSON processing and size/time limits. Reviewed read-only web tools (`web_search`, `web_fetch`, `search_web`, `fetch_url`) can also remain available when installed. For recent Coolify releases, use `https://api.github.com/repos/coollabsio/coolify/releases?per_page=3` and cite dated sources.
+- **Interactive decisions:** `jev_ask_user` shows a native Pi choice menu with 2–8 alternatives, descriptions, keyboard navigation and an optional custom answer. The chosen option returns directly to the agent in the same tool-call. The model must call this tool; plain-text A/B/C suggestions are not automatically converted.
+- **Still blocked:** edit, write, build, test, install, Git mutations and subagent spawn. Plan/Review cannot implement changes.
+
+This is a workflow guard rather than an OS/network sandbox. Public URL validation cannot guarantee protection against DNS rebinding. In noninteractive Pi mode, interactive choices require a textual fallback.
 
 **This is a workflow guard, not an OS sandbox.** It cannot prevent independent external processes, uncooperative extensions performing direct filesystem writes outside Pi's tool-call hooks, or manually modifying files outside Pi.
 

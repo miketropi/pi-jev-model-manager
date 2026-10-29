@@ -9,7 +9,8 @@ import type { Message } from "@earendil-works/pi-ai";
 import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules, type TaskType } from "./task-routing.ts";
 import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
-import { mascotLines, normalizeMascotStyle, DuckAnimator, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
+import { registerPlanningTools } from "./planning-tools.ts";
+import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
@@ -72,7 +73,6 @@ interface Config {
   subagentRouting: boolean;
   health: HealthSettings;
   mascot: MascotStyle;
-  duckMotion: boolean;
 }
 interface Decision {
   model: string;
@@ -99,7 +99,6 @@ const defaults = (): Config => ({
   subagentRouting: false, // explicit opt-in: do not rewrite external spawn tools by default
   health: { ...DEFAULT_HEALTH },
   mascot: "mascot",
-  duckMotion: true,
 });
 
 function readConfig(): Config {
@@ -117,7 +116,6 @@ function readConfig(): Config {
       subagentRouting: raw.subagentRouting === true,
       health: normalizeHealthSettings(raw.health),
       mascot: normalizeMascotStyle(raw.mascot),
-      duckMotion: raw.duckMotion !== false,
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);
@@ -144,17 +142,8 @@ function isRoutingActive(config: Config, ctx: ExtensionContext): boolean {
   return config.enabled && config.mode === "auto" && isJevSelected(ctx.model);
 }
 
-// Only one Pi session is active per extension runtime; always stop its animation
-// before switching sessions or reloading to avoid orphaned setTimeout callbacks.
-let latestDuckWidget: { ctx: ExtensionContext; config: Config; status: MascotStatus } | undefined;
-let duckFrame = 0;
-let duckRunning = false;
-let duckAnimator: DuckAnimator | undefined;
-
-function paintDuckFrame(frame: number): void {
-  duckFrame = frame;
-  if (!latestDuckWidget) return;
-  const { ctx, config, status } = latestDuckWidget;
+function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStatus): void {
+  if (ctx.mode !== "tui") return;
   const display: MascotStatus = isRoutingActive(config, ctx) ? status : {
     mood: "disabled",
     subtitle: config.enabled
@@ -163,24 +152,8 @@ function paintDuckFrame(frame: number): void {
         : "Inactive · run /jev-on"
       : "Routing off · run /jev-on",
   };
-  const lines = mascotLines(config.mascot, display, frame);
+  const lines = mascotLines(config.mascot, display);
   ctx.ui.setWidget(MASCOT_WIDGET_KEY, lines.length ? lines : undefined);
-}
-
-function syncDuckMotion(): void {
-  const view = latestDuckWidget;
-  if (!duckAnimator || !view) return;
-  const shouldRun = duckRunning && view.config.duckMotion && view.config.mascot === "mascot"
-    && isRoutingActive(view.config, view.ctx);
-  if (shouldRun) duckAnimator.start();
-  else if (duckAnimator.running) duckAnimator.stop();
-}
-
-function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStatus): void {
-  if (ctx.mode !== "tui") return;
-  latestDuckWidget = { ctx, config, status };
-  paintDuckFrame(duckFrame);
-  syncDuckMotion();
 }
 
 function keyOf(model: { provider: string; id: string }): string {
@@ -624,7 +597,6 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       "Routing & classifier options",
       "Task routing (/jev-tasks)",
       `TUI mascot: ${config.mascot}`,
-      `Duck animation: ${config.duckMotion ? "ON" : "OFF"}`,
       "Model health & failover (/jev-health)",
       `Subagent auto-routing: ${config.subagentRouting ? "ON" : "OFF"}`,
       "Test 9Router connection",
@@ -668,7 +640,7 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
       } else if (choice === "Task routing (/jev-tasks)") {
         await configureTaskRules(ctx, config.taskRules, config.models.filter(m => m.enabled), () => saveConfig(config));
       } else if (choice.startsWith("TUI mascot:")) {
-        const selected = await ctx.ui.select("Jevling Duck · TUI display", [
+        const selected = await ctx.ui.select("Jevling · TUI display", [
           "Mascot (3 lines)", "Compact (1 line)", "Off (hidden)",
         ]);
         if (!selected) continue;
@@ -676,10 +648,6 @@ async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, health: M
           : selected.startsWith("Compact") ? "compact" : "off";
         saveConfig(config);
         updateJevling(ctx, config, { mood: config.enabled ? "ready" : "disabled" });
-      } else if (choice.startsWith("Duck animation:")) {
-        config.duckMotion = !config.duckMotion;
-        saveConfig(config);
-        updateJevling(ctx, config, { mood: duckRunning ? "routing" : "ready" });
       } else if (choice === "Model health & failover (/jev-health)") {
         await configureHealthOptions(ctx, config, health);
       } else if (choice.startsWith("Subagent auto-routing:")) {
@@ -836,12 +804,8 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
 }
 
 export default function (pi: ExtensionAPI) {
-  // Clean up timers if the extension is loaded a second time via /reload.
-  duckAnimator?.stop();
-  duckRunning = false;
-  latestDuckWidget = undefined;
-  duckFrame = 0;
-  duckAnimator = new DuckAnimator(paintDuckFrame);
+  // Register read-only research and interactive choice tools at startup.
+  if (typeof pi.registerTool === "function") registerPlanningTools(pi);
   let lastDecision: Decision | undefined;
   let workflowTask: TaskType | undefined;
   let toolsBeforeStrictPhase: string[] | undefined;
@@ -849,10 +813,14 @@ export default function (pi: ExtensionAPI) {
   function changeWorkflow(task: TaskType | undefined): void {
     const wasStrict = isStrictPhase(workflowTask);
     const nextStrict = isStrictPhase(task);
-    // Preserve the actual user/extension-selected tool set; never restore a hardcoded default.
+    // Restore the user's tool selection later, including tools activated by extensions.
     if (nextStrict && !wasStrict) {
       toolsBeforeStrictPhase = pi.getActiveTools();
-      pi.setActiveTools(toolsForPhase(toolsBeforeStrictPhase, task!));
+      const registered = typeof pi.getAllTools === "function"
+        ? new Set(pi.getAllTools().map(tool => tool.name)) : new Set<string>();
+      const additions = ["jev_web_fetch", "jev_ask_user"]
+        .filter(name => registered.has(name) && !toolsBeforeStrictPhase!.includes(name));
+      pi.setActiveTools(toolsForPhase([...toolsBeforeStrictPhase, ...additions], task!));
     } else if (wasStrict && !nextStrict && toolsBeforeStrictPhase) {
       pi.setActiveTools(toolsBeforeStrictPhase);
       toolsBeforeStrictPhase = undefined;
@@ -876,9 +844,6 @@ export default function (pi: ExtensionAPI) {
   const health = new ModelHealth();
 
   pi.on?.("session_start", (_event, ctx) => {
-    duckRunning = false;
-    if (duckAnimator?.running) duckAnimator.stop();
-    latestDuckWidget = undefined;
     // Restore phase when resuming/reloading; session-specific entries avoid global leakage.
     workflowTask = undefined;
     toolsBeforeStrictPhase = undefined;
@@ -910,28 +875,8 @@ export default function (pi: ExtensionAPI) {
       mood: config.enabled ? "ready" : "disabled",
     });
   });
-  // Animate only while Pi runs an agent turn; sparse movements never reflow text.
-  pi.on?.("agent_start", (_event, ctx) => {
-    duckRunning = true;
-    const config = readConfig();
-    updateJevling(ctx, config, {
-      mood: "routing",
-      task: lastDecision?.task,
-      model: lastDecision
-        ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model
-        : undefined,
-    });
-  });
-  // Stop animation on completion, and do not leak across /reload or /resume.
-  pi.on?.("session_shutdown", () => {
-    duckRunning = false;
-    duckAnimator?.stop();
-    latestDuckWidget = undefined;
-  });
-  // Mark the duck ready at the end of a turn, retaining the last routed model.
+  // Mark the character ready at the end of a turn, retaining the last routed model.
   pi.on?.("agent_end", (_event, ctx) => {
-    duckRunning = false;
-    duckAnimator?.stop();
     const config = readConfig();
     updateJevling(ctx, config, {
       mood: config.enabled ? "ready" : "disabled",
@@ -961,10 +906,11 @@ export default function (pi: ExtensionAPI) {
     if (!workflowTask) return;
     return { systemPrompt: event.systemPrompt + "\n\n" + instructionsForTask(workflowTask) };
   });
-  pi.on?.("user_bash", () => {
+  pi.on?.("user_bash", (event) => {
     if (!isStrictPhase(workflowTask)) return;
+    if (canUseTool(workflowTask, "bash", { command: event.command })) return;
     return { result: {
-      output: `Blocked: Jev ${workflowTask} is strictly read-only. Use /jev-implement or /jev-auto first.`,
+      output: `Blocked: Jev ${workflowTask} permits only verified read-only shell commands. Use /jev-implement before making changes.`,
       exitCode: 1, cancelled: false, truncated: false,
     }};
   });
@@ -1087,7 +1033,7 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("tool_call", async (event, ctx) => {
     // Strict plan/review mode: deny all write-capable tools, including bash,
     // custom extensions, remote MCP tools, subagents and nested tool calls.
-    if (!canUseTool(workflowTask, event.toolName)) {
+    if (!canUseTool(workflowTask, event.toolName, event.input)) {
       return { block: true, reason: `Jev ${workflowTask} is read-only. Use /jev-implement or /jev-auto before modifying files or running commands.` };
     }
     const settings = readConfig();
@@ -1203,24 +1149,19 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
       const config = readConfig();
-      const selected = await ctx.ui.select("Jevling Duck · TUI display", [
+      const selected = await ctx.ui.select("Jevling · TUI mascot", [
         "Mascot (3 lines)", "Compact (1 line)", "Off (hidden)",
-        `Duck animation: ${config.duckMotion ? "ON" : "OFF"}`,
       ]);
       if (!selected) return;
-      if (selected.startsWith("Duck animation:")) {
-        config.duckMotion = !config.duckMotion;
-      } else {
-        config.mascot = selected.startsWith("Mascot") ? "mascot"
-          : selected.startsWith("Compact") ? "compact" : "off";
-      }
+      config.mascot = selected.startsWith("Mascot") ? "mascot"
+        : selected.startsWith("Compact") ? "compact" : "off";
       saveConfig(config);
       updateJevling(ctx, config, {
-        mood: duckRunning ? "routing" : config.enabled ? "ready" : "disabled",
+        mood: config.enabled ? "ready" : "disabled",
         task: lastDecision?.task,
         model: lastDecision ? config.models.find(m => m.key === lastDecision.model)?.label ?? lastDecision.model : undefined,
       });
-      ctx.ui.notify(`Duck display: ${config.mascot} · motion ${config.duckMotion ? "ON" : "OFF"}.`, "info");
+      ctx.ui.notify(`Jevling display set to ${config.mascot}.`, "info");
     },
   });
 
