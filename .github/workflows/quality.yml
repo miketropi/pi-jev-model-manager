@@ -34,7 +34,7 @@ jobs:
         run: npm test
       - name: Package smoke test
         run: |
-          npm run package:release
+          npm run release:package
           cd dist
           sha256sum --check SHA256SUMS
 

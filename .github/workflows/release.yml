@@ -38,7 +38,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
       - name: Assemble release archives
-        run: npm run package:release
+        run: npm run release:package
       - name: Verify SHA-256 checksums
         run: |
           cd dist
