@@ -60,7 +60,6 @@ import {
 import {CONFIG_PATH,readConfig,saveConfig,type Config,type ManagedModel,type Thinking,type CostTier,THINKING} from "./core/config.ts";
 const ROUTER_PROVIDER = "jev-manager";
 const ROUTER_ID = "auto";
-const MAX_PROMPT_CHARS = 10_000;
 interface Decision {
   model: string;
   task: string;
@@ -120,40 +119,7 @@ function updateJevling(ctx: ExtensionContext, config: Config, status: MascotStat
   paintRobot(robotFrame);
 }
 
-function keyOf(model: { provider: string; id: string }): string {
-  return `${model.provider}/${model.id}`;
-}
-function physicalCandidates(config: Config, ctx: ExtensionContext): ManagedModel[] {
-  const allowed = new Set(
-    ctx.modelRegistry.getAvailable()
-      .filter((m) => m.api !== "pi-virtual")
-      .map(keyOf),
-  );
-  const scoped = ctx.scopedModels.length
-    ? new Set(ctx.scopedModels.map((item) => keyOf(item.model)))
-    : null;
-  return config.models.filter(
-    (m) => m.enabled && allowed.has(m.key) && (!scoped || scoped.has(m.key)),
-  );
-}
-function resolveModel(ctx: ExtensionContext, key: string) {
-  const split = key.indexOf("/");
-  if (split < 1) return undefined;
-  return ctx.modelRegistry.find(key.slice(0, split), key.slice(split + 1));
-}
-function fallbackModel(candidates: ManagedModel[], config: Config): ManagedModel {
-  const chosen = candidates.find((m) => m.key === config.fallback);
-  // No unconfigured or inaccessible models are ever selected.
-  return chosen || candidates[0];
-}
-function lastUserText(messages: readonly Message[]): string {
-  const content = messages.filter((m) => m.role === "user").at(-1)?.content ?? "";
-  if (typeof content === "string") return content.slice(0, MAX_PROMPT_CHARS);
-  return content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("\n")
-    .slice(0, MAX_PROMPT_CHARS);
-}
+import {keyOf,physicalCandidates,resolveModel,fallbackModel,lastUserText} from "./routing/selectors.ts";
 
 async function choose(
   prompt: string,
@@ -257,35 +223,7 @@ function syncNineRouterProvider(pi: ExtensionAPI, config: Config): void {
   });
 }
 
-function newNineRouterManagedModel(remote: DiscoveredModel): ManagedModel {
-  return {
-    key: `${NINE_ROUTER_PROVIDER}/${remote.id}`,
-    label: remote.name,
-    enabled: true,
-    specialty: "General software engineering (edit capabilities after import)",
-    avoid: "",
-    cost: "balanced", // policy preference, not billed price
-    thinking: "off", // safe until user confirms that reasoning effort is supported
-    reasoning: false,
-    vision: false,
-    contextWindow: remote.contextWindow ?? 128_000,
-    maxTokens: Math.min(remote.maxTokens ?? 8_192, remote.contextWindow ?? 128_000),
-  };
-}
-
-/** Explicit import only: never rewrite hand-authored capabilities on subsequent scans. */
-function importNineRouterModel(config: Config, remote: DiscoveredModel): ManagedModel {
-  const key = `${NINE_ROUTER_PROVIDER}/${remote.id}`;
-  const existing = config.models.find((m) => m.key === key);
-  if (existing) return existing;
-  const model = newNineRouterManagedModel(remote);
-  const hints = effectiveModelProfile(model);
-  model.specialty = hints.specialty;
-  model.avoid = hints.avoid;
-  config.models.push(model);
-  if (!config.fallback) config.fallback = model.key;
-  return model;
-}
+import {newNineRouterManagedModel,importNineRouterModel} from "./integrations/nine-router-models.ts";
 
 async function configureNineRouterSettings(ctx: ExtensionContext, config: Config): Promise<boolean> {
   const envOverride = process.env[NINE_ROUTER_BASE_URL_ENV]?.trim();
