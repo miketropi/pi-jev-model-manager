@@ -370,33 +370,39 @@ When a Jev plan has finished, the native Plan approval menu now offers **two dif
 
 Other choices remain: **View/edit plan**, **Refine with AI**, **Keep for later**, and **Cancel**.
 
-### Safety and phase transitions
+### Safety and phase transitions (v0.10.5)
 
 ```text
 APPROVED PLAN
-  ├─ Implement now          → IMPLEMENT only (manual)
+  ├─ Manual Implement  → IMPLEMENT only
   └─ Auto Implement → QA → Review
-       IMPLEMENT  (all checklist tasks verified)
-            ↓
-       QA  (jev_quality_gate: pass + evidence)
-            ↓
-       REVIEW  (read-only; jev_quality_gate: pass + evidence)
-            ↓
-       COMPLETE
+         IMPLEMENT (approved checklist verified)
+                ↓
+         QA (no project file editing; actual checks)
+                ├─ PASS → REVIEW (read-only)
+                │             └─ PASS → COMPLETE
+                └─ FAIL → LEAD TRIAGE (Implementation / writable)
+                            ├─ REJECT / NEEDS_USER → PAUSE, ask user
+                            └─ ACCEPT supported issue(s)
+                                      ↓
+                              FIX + VERIFY (jev_qa_fix)
+                                      ↓
+                              QA RETRY (new independent verdict)
+                                      ├─ PASS → REVIEW
+                                      └─ FAIL → bounded retry / PAUSE
 ```
 
-Automatic continuation is **strictly gated**. Implementation must have every `jev_progress` checklist step marked done with a factual verification note before QA starts. QA and Review must call the new `jev_quality_gate` tool with a `pass` or `fail` verdict and evidence of checks performed before Jev advances. If a run is aborted, a result is missing, or a phase fails, Jev pauses/stops **without launching later phases**. It never silently assumes that an agent's final paragraph means the work was verified. There are no automatic fix/retry loops.
+**QA feedback must be actionable**: use `jev_quality_gate(outcome=fail, evidence=..., issues=[...])` with `location` (file/URL/section), `observed`, `expected`, `evidence` and `suggestedFix` for each problem. The previous `findings: string[]` remains supported for compatibility. An empty or trivially vague failure list is rejected; the Lead cannot blindly accept QA's opinion.
 
-If the agent forgets to update a checklist or gate, the pipeline intentionally pauses; use the following controls:
+When QA fails, Jev automatically switches to writable **Lead Implementation remediation**. Lead must review every issue against the approved plan and real files/sources; call `jev_qa_triage` with a `fix`, `reject`, or `needs_user` decision, factual reasoning and evidence for each ID (e.g. `QA1`). Unsupported, ambiguous, contradictory or unsafe feedback should be rejected or escalated rather than implemented blindly. If no valid fix remains, or user input is needed, the automatic pipeline **pauses**.
 
-- `/jev-pipeline-status` — Show stage, status, checks and stop reason.
-- `/jev-pipeline-resume` — Resume a **paused**, still-authorized phase (no implicit re-run after session reload).
-- `/jev-pipeline-stop` — Stop auto transitions immediately; retain session plan, completed checklist and QA/Review findings.
-- `/jev-auto` or a manual phase command — Leave/cancel automatic pipeline behavior.
+For accepted issues, Lead makes minimal corrections, checks the actual deliverable and runs appropriate tests, then calls `jev_qa_fix(changedFiles, issueIds, evidence, verification)` to record work on **every accepted issue**. Only then does Jev launch a **fresh** QA round. The original completed Implementation checklist is preserved; a QA-fix is a separate audited mini-cycle. QA and Review have restricted tool sets; QA allows read-only inspections and limited test-runner commands, not editing deliverables.
 
-Pipeline decisions and results are stored in the **current Pi session**, so state can be examined after `/reload`. On session reload an in-flight pipeline is paused rather than automatically launching work. The QA phase can run tests; Review stays under the strict read-only tool guard, but can still call `jev_quality_gate` to record its verdict. Task routing continues to honor the user's per-phase model settings.
+**Circuit breaker:** at most **3 automatic correction rounds** per pipeline; an **identical repeated QA finding set** after a correction pauses immediately. Missing QA findings, missing Lead triage, missing verified corrections, interrupted turns, unverified checklist entries, or exhausted attempts all pause safely. This protects against infinite self-correction loops without silently marking QA successful. A different but legitimate problem can be fixed within the remaining budget. Review failures still stop instead of being auto-fixed.
 
-**Limitations:** A tool-reported `pass` is an agent-provided declaration with a note, not independent proof of correctness. Verify important changes personally. The option and phase transitions are integration-tested with a mocked Pi extension runtime; live Pi TUI behavior depends on the installed Pi build. This version remains within the same Pi session rather than creating isolated sessions.
+Controls: `/jev-pipeline-status` shows the phase, correction count, issues and pause reason. `/jev-pipeline-resume` resumes a user-approved paused phase (including an interrupted Lead QA correction); `/jev-pipeline-stop` cancels automatic transitions without deleting the record; `/jev-auto` or a manual task command exits Auto mode. After Pi session reload, any running pipeline is paused rather than starting work automatically.
+
+**Important limitation:** Jev's guardrails are state and tool policies, **not** filesystem isolation. Tests invoked through a package script may have side effects. The fix and verification evidence is agent-reported; test correctness and relevance for important deliverables. Integration regression tests use mocked Pi runtime and do not prove success with every real subagent/provider combination.
 
 ## Linked Implementation Sessions (v0.9.1)
 

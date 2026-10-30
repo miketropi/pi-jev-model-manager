@@ -26,6 +26,13 @@ test("explicit commands and strict read-only policy", () => {
   assert.equal(canUseTool("review","edit"),false);
   assert.equal(canUseTool("implement","edit"),true);
   assert.equal(canUseTool("qa","bash",{command:"npm test"}),true);
+  assert.equal(canUseTool("qa","write"),false);
+  assert.equal(canUseTool("qa","edit"),false);
+  assert.equal(canUseTool("qa","bash",{command:"npm install"}),false);
+  assert.equal(canUseTool("qa","bash",{command:"echo changed > post.md"}),false);
+  assert.equal(canUseTool("qa","bash",{command:"wc -w post.md"}),true);
+  assert.deepEqual(toolsForPhase(["read","bash","write","edit","jev_quality_gate"],"qa"),
+    ["read","bash","jev_quality_gate"]);
   assert.match(instructionsForTask("plan"),/Do not implement/);
   const rules=defaultTaskRules();
   rules.plan={mode:"force",model:"test/planner"};

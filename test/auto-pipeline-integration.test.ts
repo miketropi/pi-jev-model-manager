@@ -139,15 +139,65 @@ test("Auto Implement -> QA -> Review advances only after verified tool results",
   const beforeFailure=sent.length;
   const failure=await tools.jev_quality_gate.execute("qa-failed",{
     outcome:"fail",evidence:"Integration tests failed for payment API timeout",
-    findings:["HTTP timeout handling regressed"]
+    issues:[{
+      location:"src/api/donation.ts:120",
+      observed:"HTTP timeout handling regressed on timed-out payment requests",
+      expected:"Timed-out payment requests should return retryable errors",
+      evidence:"Focused payment API regression test returns an uncaught timeout",
+      suggestedFix:"Catch the timeout and emit a retryable error response"
+    }]
   },undefined,undefined,ctx);
   assert.equal(failure.isError,undefined);
   await events.agent_settled({},ctx);
-  assert.equal(latest().status,"failed");
+  assert.equal(latest().status,"running");
+  assert.equal(latest().phase,"implement","QA fail must return to writable Lead");
+  assert.ok(active.includes("write"),"Lead remediation is writable");
+  assert.ok(active.includes("jev_qa_triage"));
+  assert.ok(active.includes("jev_qa_fix"));
+  assert.equal(latest().qaRecovery?.stage,"triage");
+  assert.equal(latest().qaRecovery?.issues[0].id,"QA1");
+  assert.equal(sent.length,beforeFailure+1,"QA fail schedules exactly one Lead turn");
+  assert.match(sent.at(-1),/JEV AUTO QA REMEDIATION/);
+  assert.match(sent.at(-1),/HTTP timeout handling regressed/);
+  const prematureQaFix=await tools.jev_qa_fix.execute("premature-fix",{
+    changedFiles:["src/api/donation.ts"],issueIds:["QA1"],
+    evidence:"Updated timeout handling logic of payment integration.",
+    verification:"Ran timeout regression tests and checked the exact diff."},
+    undefined,undefined,ctx);
+  assert.equal(prematureQaFix.isError,true,"Lead cannot skip QA feedback assessment");
+  const triage=await tools.jev_qa_triage.execute("triage",{
+    decisions:[{issueId:"QA1",disposition:"fix",
+      rationale:"Timeout handling violates the API contract requirements.",
+      evidence:"Reproduced timeout in focused payment API regression test."}]
+  },undefined,undefined,ctx);
+  assert.equal(triage.isError,undefined);
+  assert.equal(latest().qaRecovery.stage,"fixing");
+  const fixed=await tools.jev_qa_fix.execute("fix",{
+    changedFiles:["src/api/donation.ts"],issueIds:["QA1"],
+    evidence:"Adjusted payment timeout handling and retryable API error response.",
+    verification:"Ran focused payment timeout tests and inspected the changed diff."
+  },undefined,undefined,ctx);
+  assert.equal(fixed.isError,undefined);
+  await events.agent_settled({},ctx);
   assert.equal(latest().phase,"qa");
-  assert.equal(sent.length,beforeFailure,"failed QA must not schedule Review");
+  assert.equal(latest().qa,undefined,"old fail is not the new QA verdict");
+  assert.equal(latest().qaRecovery.fixRounds,1);
+  assert.ok(!active.includes("write"),"QA is read-only again");
+  assert.match(sent.at(-1),/Prior QA correction attempts/);
+  const qaPass=await tools.jev_quality_gate.execute("qa-retry-pass",{
+    outcome:"pass",evidence:"Payment timeout and API response regression tests passed."
+  },undefined,undefined,ctx);
+  assert.equal(qaPass.isError,undefined);
+  await events.agent_settled({},ctx);
+  assert.equal(latest().phase,"review");
+  const reviewPass=await tools.jev_quality_gate.execute("review-retry-pass",{
+    outcome:"pass",evidence:"Inspected timeout handling, changed diff and regression coverage."
+  },undefined,undefined,ctx);
+  assert.equal(reviewPass.isError,undefined);
+  await events.agent_settled({},ctx);
+  assert.equal(latest().status,"completed");
   await commands["jev-pipeline-stop"].handler("",ctx);
-  assert.equal(latest().status,"cancelled");
+  assert.equal(latest().status,"completed");
   // Starting another approved plan with no Pi subagent must not fake a spawn.
   await commands["jev-plan-open"].handler("",ctx);
   delete tools.subagent;

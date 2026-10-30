@@ -25,7 +25,8 @@ import { DELEGATION_ENTRY, DEFAULT_DELEGATION, normalizeDelegation,
 import { SESSION_ORIGIN_ENTRY, SESSION_LAUNCH_ENTRY, createOrigin,
   latestSessionOrigin, latestSessionLaunch, handoffTitle, type HandoffMode } from "./implementation-session.ts";
 import { PIPELINE_ENTRY, startPipeline, advancePipeline, latestPipelineFromBranch,
-  pipelineLines, reportGate, nextPhasePrompt, type PipelineState } from "./auto-pipeline.ts";
+  pipelineLines, reportGate, nextPhasePrompt, triageQaFeedback, recordQaFix,
+  qaRemediationPrompt, formatQaIssues, type PipelineState } from "./auto-pipeline.ts";
 import { ModelHealth, DEFAULT_HEALTH, normalizeHealthSettings, type HealthSettings } from "./health.ts";
 import { maskedInput, normalizeSecretInput, readSystemClipboardText } from "./config-ui.ts";
 import { credentialSource, readSecrets, resolveSecret, writeSecrets, type SecretKind } from "./secrets.ts";
@@ -947,6 +948,7 @@ export default function (pi: ExtensionAPI) {
   let implementationOrigin: ReturnType<typeof latestSessionOrigin>;
   let autoPipeline: PipelineState | undefined;
   let pipelineGateInjected = false;
+  let qaRecoveryToolsInjected: string[] = [];
 
   function savePipeline(p: PipelineState, ctx: ExtensionContext): void {
     autoPipeline = p;
@@ -1172,12 +1174,14 @@ export default function (pi: ExtensionAPI) {
   function changeWorkflow(task: TaskType | undefined): void {
     if (workflowTask === "implement" && task !== "implement") {
       const remove=[
+        ...qaRecoveryToolsInjected,
         ...(delegationToolInjected?["jev_delegate"]:[]),
         ...(nativeSubagentInjected?["subagent"]:[])
       ];
       if(remove.length)pi.setActiveTools(pi.getActiveTools().filter(name=>!remove.includes(name)));
       delegationToolInjected=false;
       nativeSubagentInjected=false;
+      qaRecoveryToolsInjected=[];
     }
     if (pipelineGateInjected && task !== workflowTask) {
       pi.setActiveTools(pi.getActiveTools().filter(n=>n!=="jev_quality_gate"));
@@ -1214,19 +1218,24 @@ export default function (pi: ExtensionAPI) {
     if (!fromPipeline) cancelPipeline(ctx,"Switched task phase manually");
     changeWorkflow(task);
     if (task === "implement" && planDocument?.status === "approved") {
-      if (!implementationProgress || implementationProgress.version !== planDocument.version
-        || ["cancelled","complete"].includes(implementationProgress.stage)) {
+      // QA repair is a separate, bounded correction workflow. Reusing the
+      // approved checklist must not reset the already-completed deliverable.
+      const repairing=fromPipeline && !!autoPipeline?.qaRecovery;
+      if (!repairing && (!implementationProgress || implementationProgress.version !== planDocument.version
+        || ["cancelled","complete"].includes(implementationProgress.stage))) {
         delegationSchedule=undefined;
         pi.appendEntry(DELEGATION_ENTRY,{cleared:true});
         saveProgress(newProgress(planDocument.markdown,planDocument.version),ctx);
-      } else saveProgress({...implementationProgress,stage:"running",visible:true},ctx);
+      } else if (!repairing && implementationProgress)
+        saveProgress({...implementationProgress,stage:"running",visible:true},ctx);
     } else if (task !== "implement" && implementationProgress?.visible) {
       closeProgress(ctx);
     }
     if (task === "plan" && args.trim()) planOriginalRequest = args.trim();
     if (task !== "implement") implementationHandoffPending = false;
     if (task !== "plan") showPlanSummary(ctx, false);
-    if (fromPipeline && task === "qa" && typeof pi.getAllTools === "function") {
+    if (fromPipeline && (task === "qa" || task === "review")
+      && typeof pi.getAllTools === "function") {
       const enabled = pi.getAllTools().some(t=>t.name==="jev_quality_gate");
       if (enabled && !pi.getActiveTools().includes("jev_quality_gate")) {
         pi.setActiveTools([...pi.getActiveTools(),"jev_quality_gate"]);
@@ -1247,6 +1256,14 @@ export default function (pi: ExtensionAPI) {
         pi.setActiveTools([...pi.getActiveTools(),"jev_progress"]);
         progressToolInjected = true;
       }
+    }
+    if(task==="implement" && fromPipeline && autoPipeline?.qaRecovery &&
+      typeof pi.getAllTools==="function"){
+      const known=pi.getAllTools().map(t=>t.name);
+      const extra=["jev_qa_triage","jev_qa_fix"].filter(t=>
+        known.includes(t) && !pi.getActiveTools().includes(t));
+      if(extra.length)pi.setActiveTools([...pi.getActiveTools(),...extra]);
+      qaRecoveryToolsInjected=extra;
     }
     showProgress(ctx);
     if (ctx.hasUI) ctx.ui.setStatus("jev-workflow",
@@ -1310,15 +1327,24 @@ export default function (pi: ExtensionAPI) {
 
   if (typeof pi.registerTool === "function") pi.registerTool({
     name:"jev_quality_gate",label:"Jev · QA/Review verdict",
-    description:"Record the outcome of an automatic QA or Review phase. Required for automatic advancement; provide factual evidence of checks performed. A fail outcome stops the pipeline.",
+    description:"Record verified QA/Review results. Failed QA must include individual actionable findings; Jev can route them to bounded Lead remediation.",
     defaultActive:false,
     promptSnippet:"Record verified QA/Review pass or fail for the active Jev pipeline.",
-    promptGuidelines:["When running an automatic Jev QA or Review phase, call jev_quality_gate exactly once with actual evidence, pass/fail and findings. Never claim pass without verification."],
+    promptGuidelines:["When running automatic QA/Review, call jev_quality_gate exactly once with observed verification. For failed QA, prefer issues[] with location, observed, expected, evidence and suggestedFix for EVERY problem; legacy findings[] remains available. QA must not edit files."],
     parameters:{type:"object",required:["outcome","evidence"],additionalProperties:false,
       properties:{
         outcome:{type:"string",enum:["pass","fail"]},
         evidence:{type:"string",minLength:12,maxLength:1000},
-        findings:{type:"array",items:{type:"string"},maxItems:16},
+        findings:{type:"array",items:{type:"string",minLength:12,maxLength:400},maxItems:16},
+        issues:{type:"array",maxItems:16,items:{type:"object",
+          required:["location","observed","expected","evidence","suggestedFix"],
+          additionalProperties:false,properties:{
+            location:{type:"string",minLength:8,maxLength:240},
+            observed:{type:"string",minLength:8,maxLength:240},
+            expected:{type:"string",minLength:8,maxLength:240},
+            evidence:{type:"string",minLength:8,maxLength:400},
+            suggestedFix:{type:"string",minLength:8,maxLength:400}
+          }}},
       }} as any,
     async execute(_id,params,_signal,_onUpdate,ctx){
       if(!autoPipeline || autoPipeline.status!=="running"
@@ -1328,12 +1354,74 @@ export default function (pi: ExtensionAPI) {
           text:"No active automatic QA/Review phase. Manual phases are not auto-gated."}]};
       try{
         const stage=workflowTask as "qa"|"review";
-        const gate=reportGate(stage,params.outcome,params.evidence,params.findings??[]);
+        if(autoPipeline[stage])throw Error("Already recorded this phase verdict; wait for the pipeline transition.");
+        const findings=Array.isArray(params.issues)&&params.issues.length
+          ? formatQaIssues(params.issues)
+          : params.findings??[];
+        const gate=reportGate(stage,params.outcome,params.evidence,findings);
         savePipeline({...autoPipeline,[stage]:gate},ctx);
         return {content:[{type:"text",text:stage.toUpperCase()+" verdict recorded: "+
-          gate.outcome+". Evidence: "+gate.evidence}],details:gate};
+          gate.outcome+". Evidence: "+gate.evidence+
+          (gate.findings?.length?"\nIssues: "+gate.findings.join("\n"):"")}],details:gate};
       }catch(e){return {isError:true,content:[{type:"text",text:String(e)}]};}
     },
+  });
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name:"jev_qa_triage",label:"Jev · Assess QA Feedback",
+    description:"Lead reviews EACH failed QA issue for correctness/evidence before editing. Decide fix, reject or needs_user; invalid/unsupported claims must not trigger speculative edits.",
+    defaultActive:false,
+    promptSnippet:"Assess every QA finding with actual evidence before applying corrections.",
+    parameters:{type:"object",required:["decisions"],additionalProperties:false,
+      properties:{decisions:{type:"array",minItems:1,maxItems:16,items:{
+        type:"object",required:["issueId","disposition","rationale","evidence"],
+        additionalProperties:false,properties:{
+          issueId:{type:"string"},
+          disposition:{type:"string",enum:["fix","reject","needs_user"]},
+          rationale:{type:"string",minLength:12,maxLength:600},
+          evidence:{type:"string",minLength:12,maxLength:600}
+        }}}}} as any,
+    async execute(_id,params,_signal,_update,ctx){
+      try{
+        if(workflowTask!=="implement"||autoPipeline?.status!=="running")
+          throw Error("Lead QA triage only runs during active Implementation remediation.");
+        const updated=triageQaFeedback(autoPipeline,params.decisions);
+        savePipeline(updated,ctx);
+        return {content:[{type:"text",text:
+          "Lead assessment recorded: "+updated.qaRecovery!.decisions!
+            .map(d=>d.issueId+"="+d.disposition+" ("+d.rationale+")").join("; ")+
+          (updated.status==="paused"
+            ?"\nAutomatic correction PAUSED: "+updated.reason+
+              ". Review /jev-pipeline-status; ask the user before continuing."
+            :"\nFix accepted issues now; verify real edits, then call jev_qa_fix. Do not self-pass QA.")}],
+          details:updated};
+      }catch(e){return {isError:true,content:[{type:"text",text:String(e)}]};}
+    }
+  });
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name:"jev_qa_fix",label:"Jev · Verify QA Fixes",
+    description:"Lead records corrections and verification for ALL accepted QA issues. Only then will the pipeline re-run read-only QA.",
+    defaultActive:false,
+    promptSnippet:"After actually editing and checking accepted issues, report changed files and verification before rerunning QA.",
+    parameters:{type:"object",required:["changedFiles","issueIds","evidence","verification"],
+      additionalProperties:false,properties:{
+        changedFiles:{type:"array",minItems:1,maxItems:30,items:{type:"string"}},
+        issueIds:{type:"array",minItems:1,maxItems:16,items:{type:"string"}},
+        evidence:{type:"string",minLength:20,maxLength:1000},
+        verification:{type:"string",minLength:20,maxLength:1000}
+      }} as any,
+    async execute(_id,params,_signal,_update,ctx){
+      try{
+        if(workflowTask!=="implement"||autoPipeline?.status!=="running")
+          throw Error("No active Lead QA correction phase.");
+        const updated=recordQaFix(autoPipeline,params);
+        savePipeline(updated,ctx);
+        return {content:[{type:"text",text:"Lead corrections recorded with verification. "+
+          "Finish this turn to rerun QA read-only. QA has NOT passed yet."}],
+          details:updated};
+      }catch(e){return {isError:true,content:[{type:"text",text:String(e)}]};}
+    }
   });
 
   if (typeof pi.registerTool === "function") pi.registerTool({
@@ -1687,14 +1775,18 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("Jev Auto stopped at "+pipeline.phase.toUpperCase()+": "+
             (updated.reason ?? "verification incomplete")+
             ". Inspect /jev-pipeline-status or continue manually.", "warning");
-        }else if(updated.phase!==pipeline.phase && ["qa","review"].includes(updated.phase)){
-          const next=updated.phase as "qa"|"review";
+        }else if(updated.phase!==pipeline.phase &&
+          ["implement","qa","review"].includes(updated.phase)){
+          const next=updated.phase as "implement"|"qa"|"review";
           await runWorkflowCommand(next,"",ctx,true,true);
           if(workflowTask !== next){
             savePipeline({...updated,status:"paused",reason:"Could not activate "+next},ctx);
           }else{
-            pi.sendUserMessage(nextPhasePrompt(next,planDocument?.markdown??"",
-              planDocument?.request),{deliverAs:"followUp"});
+            const prompt=next==="implement"
+              ?qaRemediationPrompt(updated,planDocument?.markdown??"",planDocument?.request)
+              :nextPhasePrompt(next,planDocument?.markdown??"",planDocument?.request,
+                updated.qaRecovery);
+            pi.sendUserMessage(prompt,{deliverAs:"followUp"});
           }
         }
       }
@@ -1745,6 +1837,13 @@ export default function (pi: ExtensionAPI) {
     } else if (["qa","review"].includes(workflowTask)
       && autoPipeline?.status === "running" && autoPipeline.phase === workflowTask) {
       instructions += "\n\nJEV AUTO QUALITY GATE: This phase must finish by calling jev_quality_gate with outcome pass or fail, meaningful evidence and findings. Do not claim pass without running/inspecting appropriate verification. Report fail if unable to verify. No automatic repair loops. QA may run tests; Review is strictly read-only.";
+    } else if (workflowTask === "implement" && autoPipeline?.phase==="implement"
+      && autoPipeline.qaRecovery && ["running","paused"].includes(autoPipeline.status)) {
+      instructions += "\n\nJEV AUTO QA REMEDIATION: "+
+        qaRemediationPrompt(autoPipeline,planDocument?.markdown??"",planDocument?.request)+
+        "\nDo not start a new implementation checklist or delegate an unrelated Builder wave. "+
+        "Resolve only validated QA issues, use jev_qa_triage then jev_qa_fix, and let the pipeline re-run QA. "+
+        "A correction is not a pass until read-only QA reports a fresh pass.";
     } else if (workflowTask === "implement" && planDocument?.status === "approved") {
       instructions += "\n\nIMPLEMENTATION PROGRESS: The active checklist belongs to this Pi session. Call jev_progress(action=list) to see step IDs; call jev_progress(action=update,stepId=N,status=active) before working on a step, status=done only after verifying that step with a short factual note, or status=blocked with the reason. Never mark steps done automatically or without evidence. The TUI updates from these calls; do not merely report progress in prose. Do not write auxiliary plan Markdown files inside the working repository; the approved plan is managed outside the project. Only write actual user-requested deliverables.\n";
       instructions += "\n\nApproved Jev plan v" + planDocument.version + " is the execution baseline. Do not produce another plan, planning document, review or outline instead of performing the final work.";
@@ -2175,9 +2274,11 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const message=p.phase==="implement"
-        ? "Resume the approved plan implementation. Consult jev_progress for incomplete steps, complete the deliverables and verify them.\n\n"+(planDocument?.markdown??"")
+        ? p.qaRecovery
+          ? qaRemediationPrompt(p,planDocument?.markdown??"",planDocument?.request)
+          : "Resume the approved plan implementation. Consult jev_progress for incomplete steps, complete the deliverables and verify them.\n\n"+(planDocument?.markdown??"")
         : nextPhasePrompt(p.phase as "qa"|"review",planDocument?.markdown??"",
-            planDocument?.request);
+            planDocument?.request,p.qaRecovery);
       pi.sendUserMessage(message,{deliverAs:"followUp"});
     },
   });

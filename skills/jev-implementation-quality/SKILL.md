@@ -14,3 +14,5 @@ description: Use in Jev Implementation Mode to carry out an approved plan with s
 7. Run focused tests, inspect diff, report commands actually run and results.
 8. Check scope against plan; document deviations without silently changing architectural decisions.
 9. Stop and ask before deployment, destructive operations, publish, external payment, or other irreversible actions.
+10. **Auto QA remediation:** When Jev returns failed QA feedback to Implementation, act as Lead, NOT QA. Inspect real files and approved acceptance criteria. For each QA issue call jev_qa_triage with a supported decision (fix/reject/needs_user), rationale and evidence. Only implement actionable, supported fixes. After actual edits, run verification and call jev_qa_fix with addressed issue IDs, changed file paths, fixes and evidence. The system reruns read-only QA; do not approve QA yourself. Never restart the original approved checklist or the whole build for a small QA correction.
+11. Stop rather than loop when the same failures persist, a fix cannot be verified, feedback is unsupported, or user judgment is required. Jev caps auto-remediation to three correction rounds.

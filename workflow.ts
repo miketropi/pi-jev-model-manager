@@ -22,7 +22,7 @@ export const READONLY_TOOLS = new Set([
   "web_search", "web_fetch", "search_web", "fetch_url", "jev_quality_gate",
 ]);
 export const WORKFLOW_ENTRY = "jev-workflow-phase";
-export const STRICT_PHASES = new Set<TaskType>(["plan", "review"]);
+export const STRICT_PHASES = new Set<TaskType>(["plan", "qa", "review"]);
 
 // Deliberately fail closed for shell control operators and effectful flags.
 // Agents should use jev_web_fetch for HTTPS research instead of shell curl.
@@ -44,6 +44,21 @@ export function isReadOnlyShell(command: string): boolean {
   return false;
 }
 
+/** QA may run explicitly bounded test commands, unlike Plan/Review. Test
+ * scripts can have side effects; this is policy-level separation, not a sandbox.
+ */
+export function isQaVerificationShell(command:string):boolean {
+ const s=command.trim();
+ if(isReadOnlyShell(s))return true;
+ if(!s||s.length>400||/[\r\n;|&><`$\\]/.test(s))return false;
+ if(/^(?:npm|pnpm|yarn) (?:test|run test)(?: --(?:runInBand|watch=false))?$/.test(s))return true;
+ if(/^node --test(?: [a-zA-Z0-9_./*-]+)*$/.test(s))return true;
+ if(/^pytest(?: [a-zA-Z0-9_./*-]+)*$/.test(s))return true;
+ if(/^go test(?: [a-zA-Z0-9_./*-]+)*$/.test(s))return true;
+ if(/^cargo test(?: [a-zA-Z0-9_./*-]+)*$/.test(s))return true;
+ return false;
+}
+
 export function isStrictPhase(task: TaskType | undefined): boolean {
   return task != null && STRICT_PHASES.has(task);
 }
@@ -58,7 +73,8 @@ export function canUseTool(task: TaskType | undefined, toolName: string, input?:
   if (toolName === "bash") {
     const command = input && typeof input === "object" && "command" in input
       ? (input as { command?: unknown }).command : undefined;
-    return typeof command === "string" && isReadOnlyShell(command);
+    return typeof command === "string" && (task==="qa"
+      ? isQaVerificationShell(command):isReadOnlyShell(command));
   }
   return true;
 }
@@ -69,7 +85,7 @@ export function instructionsForTask(task: TaskType): string {
     implement: "IMPLEMENTATION MODE",
     debug: "DEBUG MODE",
     review: "CODE REVIEW MODE (READ ONLY)",
-    qa: "QUALITY ASSURANCE MODE",
+    qa: "QUALITY ASSURANCE MODE (NO DELIVERABLE EDITS)",
     research: "RESEARCH MODE",
     write: "WRITING & CONTENT MODE",
     explain: "EXPLANATION MODE",
@@ -85,7 +101,7 @@ export function instructionsForTask(task: TaskType): string {
     implement: "Implement the request or previously approved plan. Inspect code, make necessary changes, run focused tests, validate results, and summarize changed files. Do not claim tests were run if they were not.",
     debug: "Reproduce and identify the root cause, make a focused fix if necessary, test the affected behavior, and explain the regression risk.",
     review: "Review existing code critically, including correctness, security and tests. You may read source, inspect git diff/log and research via read-only HTTPS tools. Do not modify files or run tests. Use jev_ask_user when a choice is necessary. Report actionable findings.",
-    qa: "Inspect acceptance criteria and risks, run tests and acceptance checks, document actual pass/fail evidence. Do not introduce feature changes unless explicitly requested.",
+    qa: "Run read-only source/acceptance checks and explicitly allowed test commands. Do not edit project deliverables or claim a pass without evidence. Record actionable failed checks for Lead in Implementation mode.",
     research: "Investigate available evidence, APIs and tradeoffs. Cite reliable sources when applicable and distinguish confirmed facts from assumptions.",
     write: "Draft the requested article, documentation or creative content. Keep the requested audience, tone and output format. Do not edit project files unless explicitly requested.",
     explain: "Explain the subject accurately, use clear examples and do not modify code or files unless specifically requested.",
