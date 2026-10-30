@@ -12,6 +12,9 @@ import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
 import { registerPlanningTools, fetchPublicText } from "./planning-tools.ts";
 import { registerHerdrPlanningTool, HERDR_PLAN_TOOL } from "./herdr-collaboration.ts";
+import {normalizeToolGrants,type ToolGrant} from "./tool-capabilities.ts";
+import {normalizePeerAdapters,registerCollaborationTool,COLLABORATION_TOOL,
+  type PeerCliAdapter} from "./collaboration-adapters.ts";
 import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing.ts";
 import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
@@ -92,6 +95,8 @@ interface Config {
   health: HealthSettings;
   mascot: MascotStyle;
   robotMotion: boolean;
+  toolGrants:ToolGrant[];
+  peerAdapters:PeerCliAdapter[];
 }
 interface Decision {
   model: string;
@@ -120,6 +125,8 @@ const defaults = (): Config => ({
   health: { ...DEFAULT_HEALTH },
   mascot: "mascot",
   robotMotion: true,
+  toolGrants:[],
+  peerAdapters:[],
 });
 
 function readConfig(): Config {
@@ -139,6 +146,8 @@ function readConfig(): Config {
       health: normalizeHealthSettings(raw.health),
       mascot: normalizeMascotStyle(raw.mascot),
       robotMotion: raw.robotMotion !== false,
+      toolGrants:normalizeToolGrants(raw.toolGrants),
+      peerAdapters:normalizePeerAdapters(raw.peerAdapters),
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);
@@ -932,7 +941,8 @@ export default function (pi: ExtensionAPI) {
   // Register read-only research and interactive choice tools at startup.
   if (typeof pi.registerTool === "function"){
     registerPlanningTools(pi);
-    registerHerdrPlanningTool(pi);
+    registerHerdrPlanningTool(pi); // backwards-compatible alias
+    registerCollaborationTool(pi,()=>readConfig().peerAdapters);
   }
   let lastDecision: Decision | undefined;
   let workflowTask: TaskType | undefined;
@@ -1176,9 +1186,6 @@ export default function (pi: ExtensionAPI) {
 
 
   function changeWorkflow(task: TaskType | undefined): void {
-    if (workflowTask==="plan" && task!=="plan"){
-      pi.setActiveTools(pi.getActiveTools().filter(n=>n!==HERDR_PLAN_TOOL));
-    }
     if (workflowTask === "implement" && task !== "implement") {
       const remove=[
         ...qaRecoveryToolsInjected,
@@ -1200,25 +1207,29 @@ export default function (pi: ExtensionAPI) {
     }
     const wasStrict = isStrictPhase(workflowTask);
     const nextStrict = isStrictPhase(task);
-    // Restore the user's tool selection later, including tools activated by extensions.
-    if (nextStrict && !wasStrict) {
-      toolsBeforeStrictPhase = pi.getActiveTools();
-      const registered = typeof pi.getAllTools === "function"
-        ? new Set(pi.getAllTools().map(tool => tool.name)) : new Set<string>();
-      const additions = ["jev_web_fetch", "jev_ask_user",
-        ...(task==="plan"?[HERDR_PLAN_TOOL]:[]),
-        ...(task === "review" && autoPipeline?.phase === "review" ? ["jev_quality_gate"] : [])]
-        .filter(name => registered.has(name) && !toolsBeforeStrictPhase!.includes(name));
-      if (additions.includes("jev_quality_gate")) pipelineGateInjected = true;
-      pi.setActiveTools(toolsForPhase([...toolsBeforeStrictPhase, ...additions], task!));
-    } else if (wasStrict && !nextStrict && toolsBeforeStrictPhase) {
+    if(nextStrict){
+      if(!wasStrict)toolsBeforeStrictPhase=pi.getActiveTools();
+      const baseline=toolsBeforeStrictPhase??pi.getActiveTools();
+      const config=readConfig();
+      const registered=typeof pi.getAllTools==="function"
+        ?new Set(pi.getAllTools().map(tool=>tool.name)):new Set<string>();
+      const candidates=[
+        ...baseline,
+        "jev_web_fetch","jev_ask_user",
+        ...(task==="plan"?[HERDR_PLAN_TOOL,COLLABORATION_TOOL]:[]),
+        ...(task==="review" && autoPipeline?.phase==="review"?["jev_quality_gate"]:[]),
+        ...config.toolGrants.map(grant=>grant.tool)
+      ];
+      const active=[...new Set(candidates)].filter(x=>
+        baseline.includes(x)||registered.has(x));
+      pi.setActiveTools(toolsForPhase(active,task!,config.toolGrants));
+      if(task==="review"&&autoPipeline?.phase==="review" &&
+        active.includes("jev_quality_gate")&&!baseline.includes("jev_quality_gate"))
+        pipelineGateInjected=true;
+    }else if(wasStrict&&toolsBeforeStrictPhase){
       pi.setActiveTools(toolsBeforeStrictPhase);
-      toolsBeforeStrictPhase = undefined;
+      toolsBeforeStrictPhase=undefined;
     }
-    if(task==="plan"&&typeof pi.getAllTools==="function" &&
-      pi.getAllTools().some(t=>t.name===HERDR_PLAN_TOOL) &&
-      !pi.getActiveTools().includes(HERDR_PLAN_TOOL))
-      pi.setActiveTools([...pi.getActiveTools(),HERDR_PLAN_TOOL]);
     workflowTask = task;
   }
 
@@ -1664,12 +1675,16 @@ export default function (pi: ExtensionAPI) {
         toolsBeforeStrictPhase = Array.isArray(saved.toolsBeforeStrictPhase)
           ? saved.toolsBeforeStrictPhase.filter((x: unknown) => typeof x === "string")
           : pi.getActiveTools();
-        const available=typeof pi.getAllTools==="function" &&
-          pi.getAllTools().some(t=>t.name===HERDR_PLAN_TOOL);
-        const configured=pi.getActiveTools();
-        pi.setActiveTools(toolsForPhase(
-          workflowTask==="plan" && available && !configured.includes(HERDR_PLAN_TOOL)
-            ? [...configured,HERDR_PLAN_TOOL] : configured, workflowTask!));
+        const registered=typeof pi.getAllTools==="function"
+          ?new Set(pi.getAllTools().map(t=>t.name)):new Set<string>();
+        const config=readConfig();
+        const candidates=[...pi.getActiveTools(),
+          "jev_web_fetch","jev_ask_user",
+          ...(workflowTask==="plan"?[HERDR_PLAN_TOOL,COLLABORATION_TOOL]:[]),
+          ...config.toolGrants.map(g=>g.tool)];
+        pi.setActiveTools(toolsForPhase([...new Set(candidates)].filter(x=>
+          pi.getActiveTools().includes(x)||registered.has(x)),
+          workflowTask!,config.toolGrants));
       }
     }
     if(workflowTask==="implement" && typeof pi.getAllTools==="function"){
@@ -1884,7 +1899,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("user_bash", (event) => {
     if (!isStrictPhase(workflowTask)) return;
-    if (canUseTool(workflowTask, "bash", { command: event.command })) return;
+    if (canUseTool(workflowTask, "bash", { command: event.command },readConfig().toolGrants)) return;
     return { result: {
       output: `Blocked: Jev ${workflowTask} permits only verified read-only shell commands. Use /jev-implement before making changes.`,
       exitCode: 1, cancelled: false, truncated: false,
@@ -2009,7 +2024,7 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("tool_call", async (event, ctx) => {
     // Strict plan/review mode: deny all write-capable tools, including bash,
     // custom extensions, remote MCP tools, subagents and nested tool calls.
-    if (!canUseTool(workflowTask, event.toolName, event.input)) {
+    if (!canUseTool(workflowTask, event.toolName, event.input,readConfig().toolGrants)) {
       return { block: true, reason: `Jev ${workflowTask} is read-only. Use /jev-implement or /jev-auto before modifying files or running commands.` };
     }
     const settings = readConfig();

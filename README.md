@@ -166,6 +166,63 @@ Choose the workflow phase intentionally, without relying on Jev to guess a task 
 # Return to Jev automatic classification.
 ```
 
+### Tool-agnostic Plan collaboration (v0.11.0)
+
+Jev strict phases use **capabilities and explicit action contracts**, rather than vendor names. Possible effects are read, communicate, delegate_research, verify, write, execute, spawn and admin. By default Plan allows only read/communicate/research delegation, QA allows read/verify, and Review allows read/communicate. All write/execute/spawn/admin effects are denied in these strict phases.
+
+**Unknown tools are denied**, even if the model claims they are safe. To integrate another Pi extension or MCP tool, add a trusted action contract to your user-owned Jev config (`jev-model-manager.json`):
+
+```json
+{
+  "toolGrants": [
+    {
+      "tool": "peer_research_tool",
+      "capability": "delegate_research",
+      "phases": ["plan"],
+      "actionField": "operation",
+      "allowedActions": ["ask_peer", "read_peer", "status"]
+    }
+  ]
+}
+```
+
+This is example schema only. Replace the name/action values with the tool's **actual registered name and schema**. Exact tool matches and action allowlists are required: `spawn_agent`, `execute`, or any other unlisted action stays blocked. You cannot override Jev's internal `bash`, `write`, `edit`, or `subagent` permissions. Only trusted users/admins should edit this policy, never the planning agent. A standalone audited read-only tool may use capability `read` with no action field; mixed-effect tools require scoped actions.
+
+For a CLI-only peer orchestration system, define a protocol adapter, rather than granting arbitrary bash:
+
+```json
+{
+  "peerAdapters": [
+    {
+      "id": "my_peer_cli",
+      "executable": "peer-runtime",
+      "commands": {
+        "list": ["peers", "list"],
+        "prompt": ["peers", "ask", "{target}", "{prompt}"],
+        "read": ["peers", "messages", "{target}", "--lines", "{lines}"],
+        "wait": ["peers", "await", "{target}", "--timeout", "{timeout}"]
+      }
+    }
+  ]
+}
+```
+
+**Illustrative command templates only**: replace them with the external CLI's real argv syntax. The adapter passes **whole argv elements** to Node `execFile` without invoking a shell. Only `list`, `get`, `read`, `wait` and `prompt` are exposed, with bounded inputs/output; no spawn, terminal control or arbitrary execution API is provided. A CLI profile is trusted, user-owned configuration; Jev cannot independently prove the external process has no side effects.
+
+In Plan the model can call:
+
+```text
+jev_collaborate(adapter="my_peer_cli", action="list")
+jev_collaborate(adapter="my_peer_cli", action="prompt",
+  target="architect", prompt="Review architecture and tradeoffs. Do not edit files.")
+jev_collaborate(adapter="my_peer_cli", action="wait",target="architect",timeoutMs=25000)
+jev_collaborate(adapter="my_peer_cli", action="read",target="architect",lines=100)
+```
+
+These are Pi agent tool calls, not slash commands. The Herdr adapter is built in and works via `jev_collaborate(adapter="herdr",...)` if Herdr is installed. `jev_herdr` stays supported for backwards compatibility. An **unfamiliar** tool can now be integrated through a declarative tool grant or CLI adapter without changing Jev's core phase policy code.
+
+**Trust boundary:** Jev guards what it calls; a separate peer may have write permissions and ignore the read-only instruction. Use independent worktrees/containers/OS permissions for actual isolation. Do not trust tool names, model assertions, or remote outputs as proof of harmlessness.
+
 ### Herdr agent collaboration during Plan (v0.10.6)
 
 When running Pi inside a Herdr session, Jev Plan Mode can collaborate with **existing Herdr agents** without granting arbitrary terminal commands or mutating the main project. The recommended agent-visible tool is \`jev_herdr\`:

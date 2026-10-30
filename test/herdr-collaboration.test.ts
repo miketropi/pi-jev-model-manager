@@ -36,7 +36,9 @@ test("Plan exposes only safe Herdr introspection and blocks shell injection and 
  ]){
   assert.equal(canUseTool("plan","bash",{command:cmd}),false,cmd);
  }
- assert.equal(canUseTool("plan",HERDR_PLAN_TOOL,{}),true);
+ assert.equal(canUseTool("plan",HERDR_PLAN_TOOL,{action:"list"}),true);
+ assert.equal(canUseTool("plan",HERDR_PLAN_TOOL,{}),false,
+   "even built-in peer tools need an approved action");
  assert.equal(canUseTool("qa",HERDR_PLAN_TOOL,{}),false);
  assert.equal(canUseTool("review",HERDR_PLAN_TOOL,{}),false);
  assert.deepEqual(toolsForPhase(["read",HERDR_PLAN_TOOL,"bash","write"],"review"),["read","bash"]);

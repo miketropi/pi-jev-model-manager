@@ -3,6 +3,7 @@
  * Not a security sandbox; external processes/plugins can execute independently.
  */
 import { applyTaskRule, type TaskType, type TaskRules } from "./task-routing.ts";
+import {grantForPhase,grantsToolCall,toolGrants,type ToolGrant} from "./tool-capabilities.ts";
 
 export const WORKFLOW_COMMANDS = {
   plan: "jev-plan",
@@ -17,10 +18,9 @@ export const WORKFLOW_COMMANDS = {
 
 // Agent can investigate in Plan/Review: project read tools, read-only shell,
 // the Jev HTTPS reader, interactive decisions and independently reviewed web tools.
-export const READONLY_TOOLS = new Set([
-  "read", "grep", "find", "ls", "bash", "jev_web_fetch", "jev_ask_user",
-  "web_search", "web_fetch", "search_web", "fetch_url", "jev_quality_gate",
-  "jev_herdr",
+/** Compatibility export: capabilities, not membership in this list, gate strict calls. */
+export const READONLY_TOOLS=new Set([
+  ...toolGrants().map(x=>x.tool),"bash"
 ]);
 export const WORKFLOW_ENTRY = "jev-workflow-phase";
 export const STRICT_PHASES = new Set<TaskType>(["plan", "qa", "review"]);
@@ -91,22 +91,23 @@ export function isStrictPhase(task: TaskType | undefined): boolean {
   return task != null && STRICT_PHASES.has(task);
 }
 
-export function toolsForPhase(active: readonly string[], task: TaskType): string[] {
-  return isStrictPhase(task) ? active.filter(x =>
-    READONLY_TOOLS.has(x) && (x!=="jev_herdr" || task==="plan")) : [...active];
+export function toolsForPhase(active:readonly string[],task:TaskType,
+ configured:readonly ToolGrant[]=[]):string[]{
+ if(!isStrictPhase(task))return [...active];
+ return active.filter(tool=>tool==="bash" ||
+   !!grantForPhase(tool,task as "plan"|"qa"|"review",configured));
 }
-
-export function canUseTool(task: TaskType | undefined, toolName: string, input?: unknown): boolean {
-  if (!isStrictPhase(task)) return true;
-  if (!READONLY_TOOLS.has(toolName)) return false;
-  if(toolName==="jev_herdr")return task==="plan";
-  if (toolName === "bash") {
-    const command = input && typeof input === "object" && "command" in input
-      ? (input as { command?: unknown }).command : undefined;
-    return typeof command === "string" && (task==="qa"
-      ? isQaVerificationShell(command):isReadOnlyShell(command));
-  }
-  return true;
+export function canUseTool(task:TaskType|undefined,toolName:string,
+ input?:unknown,configured:readonly ToolGrant[]=[]):boolean {
+ if(!isStrictPhase(task))return true;
+ const phase=task as "plan"|"qa"|"review";
+ if(toolName==="bash"){
+  const command=input&&typeof input==="object"&&"command" in input
+    ?(input as {command?:unknown}).command:undefined;
+  return typeof command==="string" && (phase==="qa"
+    ?isQaVerificationShell(command):isReadOnlyShell(command));
+ }
+ return grantsToolCall(toolName,phase,input,configured);
 }
 
 export function instructionsForTask(task: TaskType): string {
@@ -125,6 +126,7 @@ export function instructionsForTask(task: TaskType): string {
       "Analyze the user's request and relevant files, investigate constraints, propose alternatives and a numbered plan.",
       "Do not implement, edit/create/delete files, run tests, install dependencies, invoke mutating tools or delegate changes.",
       "You MAY inspect source using read/search and tightly restricted read-only bash (git log, git diff, rg, cat), and MUST research fresh facts with jev_web_fetch or an available read-only web search tool. Do not guess dates, releases or versions.",
+      "For any trusted agent orchestrator, use a registered read/communication capability tool. Unknown tools are denied until the user explicitly configures scoped toolGrants in Jev config; no agent may change its own permissions during Plan.",
       "When running inside Herdr, you MAY collaborate with existing agents using jev_herdr (list, get, read, wait, prompt) for read-only research, architectural critique, and independent plan review. Never ask peer agents to edit files, run tests/commands, implement, or spawn other agents. Inspect and verify peer conclusions before incorporating them.",
       "Plain Herdr agent list/get/read/wait introspection via bash is allowed in Plan; send agent prompts only with jev_herdr, not unrestricted Herdr CLI/shell commands.",
       "When comparing alternatives or requiring a decision, CALL jev_ask_user with 2–8 concrete options and short descriptions. Do not dump A/B/C in prose expecting the user to type a reply.",
