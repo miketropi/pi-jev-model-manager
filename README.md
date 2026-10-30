@@ -7,11 +7,11 @@ A reference Pi extension for automatic model choice via TypeSafe Jev with a nati
 ## Features
 - Plan/Review can perform read-only web research and open native user-choice menus without editing files.
 - Jevling robot: a compact three-line TUI companion with subtle cancellable eye/antenna animation during active agent turns.
-- A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`.
+- A native virtual model: `jev-manager/auto`, activated using `/jev-on` or selected from `/model`; saved ON restores on future Pi/Herdr launches.
 - Jev typed decisions via `ctx.modelRegistry.classify()`; 9Router discovery uses the built-in `fetch()` API (no extra SDK).
 - Interactive Pi TUI model registry at `/jev-models`: add, enable/disable, describe capabilities, set preferred thinking, relative cost, fallback, and confidence threshold.
 - Explicit `/jev-plan`, `/jev-implement`, `/jev-qa`, `/jev-debug`, `/jev-review`, `/jev-research`, `/jev-write`, `/jev-explain` and `/jev-auto` commands with mode-specific model assignment and read-only planning safeguards.
-- `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, `/jev-on`, and `/jev-mascot` for routing, health and TUI display controls.
+- `/jev-test <task>` dry-run, `/jev-status`, `/jev-health`, `/jev-on`, `/jev-off`, and `/jev-mascot` for routing, health and TUI display controls.
 - `/jev-scan` to discover models from a 9Router OpenAI-compatible API and import **selected** model IDs.
 - Native `/jev-models` menu contains **9Router settings** and **Scan 9Router models**.
 - Imported 9Router models become physical Pi models under `jev-9router/<original-model-id>` (e.g. `jev-9router/cc/claude-opus-...`), available immediately without overwriting an existing `9router` provider.
@@ -108,19 +108,23 @@ The preference is saved in `jev-model-manager.json` and survives restarts. Jevli
 
 ## Activate routing in your Pi session (v0.5.2)
 
-**Important:** Loading this extension, configuring keys, enabling Routing in the settings, or seeing the Jevling mascot **does not automatically route Pi requests**. Pi will continue using its selected physical/default model until the virtual model is selected.
+**Important:** Loading this extension, configuring keys, enabling Routing in the settings, or seeing the Jevling mascot **does not route until the virtual model is selected**. After a saved /jev-on, future Pi processes restore that selection on startup.
 
 The easiest activation workflow inside Pi is:
 
 ```text
 /jev-config     # configure credentials, models and task rules
-/jev-on         # enable auto mode and select jev-manager/auto in THIS Pi session
+/jev-on         # enable now, remember ON for future Pi/Herdr launches
 /jev-status     # must report "Jev routing ACTIVE" and "Pi selected model: jev-manager/auto"
 ```
 
 Alternatively, use `/model` to select `jev-manager/auto` manually and ensure **Routing = ON**, **Mode = auto** in `/jev-config`. If the selected model remains a provider model (such as `anthropic/...` or `jev-9router/...`), Jev task routing is **INACTIVE** even if the saved routing flag is ON.
 
-`/jev-on` validates that at least one enabled/authenticated physical model is eligible, then uses Pi's supported `pi.setModel()` API to select the virtual model without overwriting Pi's global default. It is intentionally **not automatically activated** on every session: a user's manual model selection or an explicitly launched model should be respected. Resuming a session where the virtual model was selected restores it through Pi session history.
+`/jev-on` validates that at least one enabled/authenticated physical model is eligible, then selects `jev-manager/auto` using `pi.setModel()`. **It now persists the user's ON preference** in global Jev config. Future Pi process launches, including headless Pi instances spawned by Herdr CLI, restore the virtual model on `session_start`. The Pi global default model is not changed.
+
+Auto restoration requires saved `enabled: true` and `mode: auto`. First install remains OFF. Selection occurs only at session startup: changing model manually in an active session is not immediately overridden. Use `/jev-off` to persist OFF and switch to the configured physical fallback. Observe mode is preserved.
+
+For a single Pi/Herdr child that should keep its own selected model, set `JEV_AUTO_ACTIVATE=0` in that process environment. This skips restoration without erasing saved ON; explicit `/jev-on` still activates Jev. Parent and child must use the same Pi agent config directory (`~/.pi/agent` by default, or the same `PI_CODING_AGENT_DIR`). If no compatible authenticated model is available, Jev leaves the current Pi model selected and keeps saved ON for a later retry.
 
 Jevling now reports **STANDBY / Inactive · run /jev-on** when the extension is loaded but Pi has selected a physical model, instead of misleadingly showing READY. `/jev-status` shows **ACTIVE/INACTIVE**, the selected Pi model, eligible candidate count and last routing decision.
 

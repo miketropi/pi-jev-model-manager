@@ -4,14 +4,14 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-test("Jev only routes after /jev-on activates virtual model; blog prompts use write task", async () => {
+test("First-time Jev stays OFF until /jev-on; blog prompts use write task", async () => {
   const dir = mkdtempSync(join(tmpdir(), "jev-activation-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   const physical = ["fast", "writer"].map(id => ({ provider: "test", id, api: "openai-completions" }));
   const virtual = { provider: "jev-manager", id: "auto", api: "pi-virtual" };
   const configured = {
-    version: 1, enabled: true, mode: "auto",
+    version: 1, enabled: false, mode: "auto",
     classifier: { provider: "typesafe", model: "jev-latest" },
     nineRouter: { baseUrl: "http://127.0.0.1:20128/v1", apiKeyEnv: "NINEROUTER_API_KEY" },
     fallback: "test/fast", minProbability: 0.43,
@@ -67,7 +67,7 @@ test("Jev only routes after /jev-on activates virtual model; blog prompts use wr
     assert.equal(switches, 0, "loading Jev never overrides Pi's selected model");
     assert.ok(widgets.at(-1)?.join("\n").includes("STANDBY"));
     assert.ok(widgets.at(-1)?.join("\n").includes("/jev-on"));
-    assert.ok(notices.some(n => n.includes("INACTIVE")));
+    assert.equal(notices.some(n => n.includes("restored from saved ON state")),false);
     await commands["jev-status"].handler("", ctx);
     assert.ok(notices.at(-1)?.includes("INACTIVE"));
     await commands["jev-on"].handler("", ctx);
