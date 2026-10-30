@@ -17,6 +17,7 @@ import {normalizePeerAdapters,registerCollaborationTool,COLLABORATION_TOOL,
   type PeerCliAdapter} from "./collaboration-adapters.ts";
 import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing.ts";
 import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
+import { choosePlanReviewAction } from "./plan-review-ui.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { RobotMotion } from "./robot-motion.ts";
 import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestProgress, progressLines, type Progress } from "./progress.ts";
@@ -177,11 +178,18 @@ function isRoutingActive(config: Config, ctx: ExtensionContext): boolean {
 let robotView: { ctx: ExtensionContext; config: Config; status: MascotStatus } | undefined;
 let robotFrame = 0;
 let robotAnimator: RobotMotion | undefined;
+let planReviewActive = false;
 
 function paintRobot(frame: number): void {
   robotFrame = frame;
   if (!robotView) return;
   const { ctx, config, status } = robotView;
+  // A review overlay owns the viewport; asynchronous routing/animation
+  // events must not repaint the robot underneath the plan reader.
+  if (planReviewActive) {
+    ctx.ui.setWidget(MASCOT_WIDGET_KEY, undefined);
+    return;
+  }
   const display: MascotStatus = isRoutingActive(config, ctx) ? status : {
     mood: "disabled",
     subtitle: config.enabled
@@ -1117,16 +1125,16 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Plan saved in session. Open the session in Pi TUI to review/edit.", "info");
       return;
     }
+    planReviewActive = true;
+    try {
     for (let step = 0; step < 12; step++) {
-      const choice = await ctx.ui.select(
-        `Jev Plan v${planDocument.version} · ${planDocument.status} · next action`,
-        ["View / edit full plan",
-         "Implement now · New session (recommended)",
-         "Auto Implement → QA → Review · New session",
-         "Implement now (approve plan)",
-         "Auto Implement → QA → Review (approve plan)",
-         "Refine with AI", "Keep plan for later", "Cancel"],
-      );
+      // Give review content its own scrollable viewport; suppress widgets.
+      if (ctx.mode === "tui") {
+        ctx.ui.setWidget("jev-plan-summary", undefined);
+        ctx.ui.setWidget(MASCOT_WIDGET_KEY, undefined);
+        robotAnimator?.stop();
+      }
+      const choice = await choosePlanReviewAction(ctx, planDocument);
       if (!choice || choice === "Keep plan for later" || choice === "Cancel") {
         showPlanSummary(ctx, false);
         cleanPlanMirror(trackedSessionId);
@@ -1180,6 +1188,14 @@ export default function (pi: ExtensionAPI) {
         implementationHandoffPending = true;
         pi.sendUserMessage(implementationHandoff(approved), {deliverAs:"followUp"});
         return;
+      }
+    }
+    } finally {
+      planReviewActive = false;
+      // Restore robot after review closes, even after edit/refine or errors.
+      if (ctx.mode === "tui") {
+        showPlanSummary(ctx, planSummaryVisible && workflowTask === "plan", false);
+        paintRobot(robotFrame);
       }
     }
   }
@@ -1632,6 +1648,7 @@ export default function (pi: ExtensionAPI) {
   const health = new ModelHealth();
 
   pi.on?.("session_start", async (event, ctx) => {
+    planReviewActive = false; // a new Pi session cannot inherit an old modal
     robotView = undefined;
     robotAnimator?.stop();
     implementationHandoffPending = false;

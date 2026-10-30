@@ -17,13 +17,17 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   taskRules:rules};
  const events={},commands={},entries=[],messages=[],sent=[],status=[],menus=[],tools={};
  let model=models[0],active=["read","write","bash","edit","grep","find","ls"];
- let option="Keep plan for later",edits=0;
+ let option="Keep plan for later",edits=0,robotHiddenInReview=false;
  const ctx={mode:"tui",hasUI:true,scopedModels:[],
    get model(){return model;},
    sessionManager:{getBranch:()=>entries,getSessionId:()=>"jev-test-session-01"},
    ui:{
     notify(){},setWidget(...x){status.push(x)},setStatus(){},
-    select:async(title,choices)=>{menus.push(title);return option},
+    select:async(title,choices)=>{
+      menus.push(title);
+      robotHiddenInReview=status.filter(x=>x[0]==="jev-manager:mascot").at(-1)?.[1]===undefined;
+      return option;
+     },
     editor:async()=>{edits++;return "# Updated Plan\n\n"+"This plan now includes acceptance tests. ".repeat(5)},
    },
    modelRegistry:{getAvailable:()=>models,find:(p,id)=>p==="jev-manager"?virt:models.find(x=>x.provider===p&&x.id===id)}
@@ -53,6 +57,9 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   option="Cancel";
   const beforeCancel=sent.length;
   await commands["jev-plan-open"].handler("",ctx);
+  assert.equal(robotHiddenInReview,true,"hide Jev robot while reviewing plan");
+  assert.ok(Array.isArray(status.filter(x=>x[0]==="jev-manager:mascot").at(-1)?.[1]),
+    "restore robot after review is closed");
   assert.equal(sent.length,beforeCancel,"Cancel must never trigger execution");
   assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,
     "Cancel must dismiss the plan widget");
