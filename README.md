@@ -287,8 +287,8 @@ After `/jev-plan [task]` completes and Pi has **settled** (including any retries
 
 1. Collects the final planning response as formatted Markdown and saves it as a versioned, **session-scoped** document via Pi session entries (without editing project files).
 2. Publishes the Markdown in the Pi conversation and shows a small plan summary above the editor.
-3. Opens a scroll-first Plan Review overlay in supported Pi TUI: Markdown occupies most of the viewport, with all eight actions in a compact one-line selector. Robot and summary widgets are hidden during review. RPC and old TUI clients retain the native menu.
-4. Keyboard: Up/Down scroll, PageUp/PageDown jump, Home/End navigate, Tab changes focus, Left/Right choose actions, Enter applies, and Esc keeps the plan for later without approval. Full Markdown editing and approval handoff behave as before.
+3. Opens a **read-first Plan Review overlay** in supported Pi TUI: Markdown occupies most of the viewport and an **always-visible action hint** lists the main commands. No hidden keyboard focus or horizontal action cycling is required. Robot and summary widgets are hidden during review. RPC and older Pi clients keep their native menu.
+4. **One-step keyboard actions:** Up/Down always scroll the Plan; PageUp/PageDown and Home/End navigate the document. **E** edits the Plan, **I** approves and implements in a new session (recommended), **A** approves the automatic Implement → QA → Review pipeline in a new session, **R** requests AI refinement. **M** or **Enter** opens the **native full action menu** for all eight choices, including same-session implementation; **Esc** keeps the Plan for later without approval. The menu is deliberately explicit: pressing Enter while reading **never auto-approves** anything. There is no Tab focus mode or Left/Right action cycling.
 5. **Refine with AI** stays in strict read-only Plan Mode and creates a new draft for review. **Keep for later** and **Cancel** never start implementation.
 
 On small terminals, the review viewport adapts and preserves position at the end when resized. Opening review does not inject duplicate Plan content into conversation history.

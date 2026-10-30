@@ -1,6 +1,7 @@
 /**
- * Scroll-first, viewport-bounded plan review. Do not load Pi TUI in non-TUI mode.
- * Pi owns overlay lifecycle, terminal resizing, and Markdown rendering.
+ * Read-first Plan review. The entire viewer has ONE keyboard context:
+ * arrows always scroll; advertised single-key actions work immediately.
+ * Secondary actions are available through the familiar native Pi selector.
  */
 import type {PlanDocument} from "./plan-artifact.ts";
 
@@ -12,6 +13,7 @@ export const PLAN_REVIEW_OPTIONS=[
   "Auto Implement → QA → Review (approve plan)",
   "Refine with AI","Keep plan for later","Cancel"
 ] as const;
+export const PLAN_REVIEW_MORE_ACTIONS="jev-plan-review:more-actions";
 
 type ReviewTheme={fg:(name:string,text:string)=>string};
 type ReviewKeys={matches:(data:string,key:string)=>boolean};
@@ -22,11 +24,16 @@ export interface PlanReviewComponent {
 export interface ReviewText {render:(width:number)=>string[];invalidate?:()=>void}
 export interface ReviewLayout {
  viewportRows:number;documentRows:number;scroll:number;
- start:number;end:number;selected:number;focus:"document"|"actions";
+ start:number;end:number;
 }
 export function reviewHeight(terminalRows:number):number {
  const rows=Number.isFinite(terminalRows)?Math.floor(terminalRows):24;
  return Math.max(6,Math.min(Math.max(6,rows-2),Math.floor(rows*.88)));
+}
+export function reviewActionHints(width:number,compact=false):string{
+ if(compact||width<53)return "E Edit · I Implement · M More · Esc Later";
+ if(width<82)return "E Edit  ·  I Implement  ·  A Auto  ·  R Refine  ·  M More";
+ return "[E] Edit    [I] Implement · new session    [A] Auto QA/Review    [R] Refine    [M] More";
 }
 export function createPlanReviewComponent(args:{
  plan:PlanDocument;tui:ReviewDimensions;theme:ReviewTheme;keys:ReviewKeys;
@@ -35,8 +42,7 @@ export function createPlanReviewComponent(args:{
  visibleWidth:(text:string)=>number;done:(choice:string)=>void;
 }):PlanReviewComponent & {getLayout:()=>ReviewLayout} {
  const {plan,tui,theme,keys,markdown,truncate,visibleWidth,done}=args;
- let scroll=0,selected=0,focus:"document"|"actions"="document";
- let contentWidth=-1,content:string[]=[];
+ let scroll=0,contentWidth=-1,content:string[]=[];
  let height=reviewHeight(tui.terminal.rows);
  let viewport=Math.max(1,height-(height<11?4:7));
  const padded=(value:string,n:number)=>{
@@ -54,8 +60,7 @@ export function createPlanReviewComponent(args:{
   scroll=Math.max(0,Math.min(scroll,max));
   return {viewportRows:viewport,documentRows:content.length,
    scroll,start:content.length?scroll+1:0,
-   end:Math.min(content.length,scroll+viewport),
-   selected,focus};
+   end:Math.min(content.length,scroll+viewport)};
  };
  const key=(data:string,id:string)=>keys.matches(data,id);
  const component:PlanReviewComponent & {getLayout:()=>ReviewLayout}={
@@ -75,45 +80,44 @@ export function createPlanReviewComponent(args:{
    const header=theme.fg("accent","JEV  /  PLAN REVIEW   v"+plan.version)+
      theme.fg("muted","  ·  "+plan.status.toUpperCase());
    const counter=info.documentRows?
-     info.start+"-"+info.end+" / "+info.documentRows+" lines":"Empty plan";
-   const headRow=theme.fg("accent",focus==="document"?" ● ":" ○ ")+
-     "Plan · "+counter;
-   const choice=PLAN_REVIEW_OPTIONS[selected];
-   const action=theme.fg("accent",focus==="actions"?" ● ":" ○ ")+
-     "Action "+(selected+1)+"/"+PLAN_REVIEW_OPTIONS.length+": "+choice;
-   const help=focus==="document"
-     ?"↑↓ scroll  PgUp/PgDn  Home/End  Tab/←→ actions  Esc close"
-     :"←→ choose action  Enter apply  Tab back to plan  Esc close";
+     info.start+"–"+info.end+" / "+info.documentRows+" lines":"Empty plan";
+   const headRow=theme.fg("muted","READ PLAN  ·  "+counter+"  ·  ↑↓ / PgUp PgDn to scroll");
+   const hint=theme.fg("accent",reviewActionHints(inside,compact));
+   const help=theme.fg("muted",
+      "↑↓ Scroll · PgUp/PgDn · Home/End · Enter All actions · Esc Keep for later");
    const lines=compact
      ?[border("╭","╮"),row(header)]
      :[border("╭","╮"),row(header),row(headRow)];
    for(let i=0;i<viewport;i++)lines.push(row(content[scroll+i]??""));
    if(!compact)lines.push(row(theme.fg("border","─".repeat(Math.max(1,inside)))));
-   lines.push(row(action));
-   if(!compact)lines.push(row(theme.fg("muted",help)));
+   lines.push(row(hint));
+   if(!compact)lines.push(row(help));
    lines.push(border("╰","╯"));
    return lines.map(line=>truncate(line,w,""));
   },
   handleInput(data:string):void {
    if(key(data,"escape")||key(data,"ctrl+c")){done("Keep plan for later");return;}
-   if(key(data,"tab")||key(data,"shift+tab")){
-    focus=focus==="document"?"actions":"document";
-   }else if(key(data,"left")||key(data,"right")){
-    selected=(selected+(key(data,"right")?1:-1)+PLAN_REVIEW_OPTIONS.length)%PLAN_REVIEW_OPTIONS.length;
-    focus="actions";
-   }else if(key(data,"enter")){
-    if(focus==="actions"){done(PLAN_REVIEW_OPTIONS[selected]);return;}
-    focus="actions";
-   }else if(key(data,"up")||key(data,"down")){
-    const delta=key(data,"down")?1:-1;
-    if(focus==="actions")
-      selected=(selected+delta+PLAN_REVIEW_OPTIONS.length)%PLAN_REVIEW_OPTIONS.length;
-    else scroll=Math.max(0,scroll+delta);
-   }else if(key(data,"pageup")||key(data,"pagedown")){
-    focus="document";
-    scroll=Math.max(0,scroll+(key(data,"pagedown")?viewport:-viewport));
-   }else if(key(data,"home")){scroll=0;focus="document";}
-   else if(key(data,"end")){scroll=Math.max(0,content.length-viewport);focus="document";}
+   // All visible shortcuts work immediately. No hidden focus, mode switch
+   // or "Enter while reading" ambiguity. Implementation requires an explicit
+   // I / A key or a deliberate choice from the native action menu.
+   const action=typeof data==="string"?data.toLowerCase():"";
+   const shortcuts:Record<string,string>={
+    "e":PLAN_REVIEW_OPTIONS[0],
+    "i":PLAN_REVIEW_OPTIONS[1],
+    "a":PLAN_REVIEW_OPTIONS[2],
+    "r":PLAN_REVIEW_OPTIONS[5],
+    "m":PLAN_REVIEW_MORE_ACTIONS,
+   };
+   if(Object.prototype.hasOwnProperty.call(shortcuts,action)){
+    done(shortcuts[action]);return;
+   }
+   if(key(data,"enter")||data==="?"){done(PLAN_REVIEW_MORE_ACTIONS);return;}
+   if(key(data,"up"))scroll-=1;
+   else if(key(data,"down"))scroll+=1;
+   else if(key(data,"pageup"))scroll-=viewport;
+   else if(key(data,"pagedown"))scroll+=viewport;
+   else if(key(data,"home"))scroll=0;
+   else if(key(data,"end"))scroll=Math.max(0,content.length-viewport);
    else return;
    layout();tui.requestRender();
   },
@@ -162,8 +166,12 @@ export async function choosePlanReviewAction(
    },{overlay:true,overlayOptions:{
     anchor:"center",width:"96%",maxHeight:"90%",margin:1
    }});
+   if(result===PLAN_REVIEW_MORE_ACTIONS){
+    return ctx.ui.select("Jev Plan v"+plan.version+" · choose next action",
+     [...PLAN_REVIEW_OPTIONS]);
+   }
    if(result!==undefined)return result;
-  }catch{ /* Unsupported older Pi UI: use its native dialog instead. */ }
+  }catch{ /* Unsupported older Pi UI: use the native selector. */ }
  }
  return ctx.ui.select("Jev Plan v"+plan.version+" · "+plan.status+" · next action",
   [...PLAN_REVIEW_OPTIONS]);
