@@ -18,7 +18,7 @@ import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestPro
 import { savePlanMirror, cleanPlanMirror, pruneOldPlanMirrors } from "./plan-cache.ts";
 import { DELEGATION_ENTRY, DEFAULT_DELEGATION, normalizeDelegation,
   createDelegationSchedule, latestDelegation, subagentReady, scheduleInstructions,
-  nextDelegationWave, recordDelegationRun, delegatePrompt,
+  nextDelegationWave, recordDelegationRun, fallbackDelegationToLead, delegatePrompt,
   type DelegationSettings, type DelegationSchedule,
   type ProposedTask } from "./delegation.ts";
 import { SESSION_ORIGIN_ENTRY, SESSION_LAUNCH_ENTRY, createOrigin,
@@ -917,8 +917,10 @@ export default function (pi: ExtensionAPI) {
     if(rows && delegationSchedule?.version===p?.version){
       for(let i=1;i<rows.length;i++){
         const number=Number(/^.[ ]+(\d+)\./.exec(rows[i])?.[1]);
-        if(delegationSchedule.waves.some(w=>w.execution==="builder" &&
-          w.tasks.some(t=>t.stepId===number)))rows[i]+=" · Builder";
+        const assigned=delegationSchedule.waves.find(w=>w.tasks.some(t=>t.stepId===number));
+        if(assigned?.execution==="builder")rows[i]+=" · Builder";
+        else if(assigned && delegationSchedule.fallbacks?.some(f=>
+          delegationSchedule!.waves[f.wave]===assigned))rows[i]+=" · Lead fallback";
       }
     }
     ctx.ui.setWidget(PROGRESS_WIDGET,rows);
@@ -1224,7 +1226,11 @@ export default function (pi: ExtensionAPI) {
               w.tasks.some(t=>t.stepId===params.stepId));
             if(waveIndex>=0 && !delegationSchedule.runs?.some(r=>
               r.wave===waveIndex && r.status==="reported"))
-              throw Error("Builder step has no successful subagent tool result. Run jev_delegate(action=run), inspect the result and verify tests before marking done.");
+              throw Error("Builder step has no successful subagent tool result. Use jev_delegate(action=run), or jev_delegate(action=lead,reason=...) for audited direct Lead fallback; then verify the work.");
+            const leadFallback=delegationSchedule.fallbacks?.some(f=>
+              delegationSchedule!.waves[f.wave]?.tasks.some(t=>t.stepId===params.stepId));
+            if(leadFallback && (typeof params.note!=="string"||params.note.trim().length<12))
+              throw Error("Lead fallback completion requires meaningful verification evidence (at least 12 characters).");
           }
           saveProgress(changeProgress(p,params.stepId,params.status,params.note),ctx);
         } else if(params.action==="set_steps"){
@@ -1272,12 +1278,13 @@ export default function (pi: ExtensionAPI) {
 
   if (typeof pi.registerTool === "function") pi.registerTool({
     name:"jev_delegate",label:"Jev · Delegate Implementation Tasks",
-    description:"Schedule approved checklist steps conservatively, then actually execute Builder waves using Pi's native subagent tool (isolated process). Lead must verify results before updating jev_progress. Actions: plan, run, status.",
+    description:"Schedule approved checklist steps conservatively, then actually execute Builder waves using Pi's native subagent tool (isolated process). Lead must verify results before updating jev_progress. Actions: plan, run, lead, status.",
     defaultActive:false,
     promptSnippet:"Use jev_delegate to plan independent scoped implementation tasks and run Builder waves. Lead verifies every wave before checking off steps.",
     promptGuidelines:["Only in Jev IMPLEMENT: call jev_delegate(action=plan) with each checklist step, relative file ownership, dependencies and estimated effort. Call action=run to execute one verified-ready wave. Never declare a subagent successful without reviewing the tool result and running checks."],
     parameters:{type:"object",required:["action"],additionalProperties:false,properties:{
-      action:{type:"string",enum:["plan","run","status"]},
+      action:{type:"string",enum:["plan","run","lead","status"]},
+        reason:{type:"string",minLength:12,maxLength:240},
       tasks:{type:"array",maxItems:16,items:{type:"object",required:["stepId","files","dependsOn","effort"],
         additionalProperties:false,properties:{
           stepId:{type:"integer"},files:{type:"array",items:{type:"string"},maxItems:24},
@@ -1291,47 +1298,68 @@ export default function (pi: ExtensionAPI) {
         return {isError:true,content:[{type:"text",text:"jev_delegate requires an approved plan in Jev Implementation mode."}]};
       const config=readConfig().delegation;
       try {
-        if(params.action==="plan"){
-          if(!Array.isArray(params.tasks))throw Error("Supply tasks with step IDs, file scopes, dependencies and effort");
-          const schedule=createDelegationSchedule(implementationProgress,
-            params.tasks as ProposedTask[],config);
+        const toolNames=typeof pi.getAllTools==="function" ? pi.getAllTools().map(t=>t.name) : [];
+        const nativeAvailable=subagentReady(toolNames) && typeof (ctx as any).executeTool==="function";
+        const unavailableReason="Native Pi subagent unavailable; NO Builder was spawned.";
+        const saveSchedule=(schedule:DelegationSchedule)=>{
           delegationSchedule=schedule;
           pi.appendEntry(DELEGATION_ENTRY,schedule);
-          const toolNames=typeof pi.getAllTools==="function"
-            ?pi.getAllTools().map(t=>t.name):[];
-          const ready=subagentReady(toolNames)&&typeof (ctx as any).executeTool==="function";
+        };
+        if(params.action==="plan"){
+          if(!Array.isArray(params.tasks))throw Error("Supply tasks with step IDs, file scopes, dependencies and effort");
+          let schedule=createDelegationSchedule(implementationProgress,
+            params.tasks as ProposedTask[],config);
+          if(!nativeAvailable && config.strategy!=="always")
+            schedule=fallbackDelegationToLead(schedule,implementationProgress,unavailableReason,
+              {allowStrategyChange:config.strategy!=="always"});
+          saveSchedule(schedule);
+          const fallback=schedule.fallbacks?.length;
           return {content:[{type:"text",text:scheduleInstructions(schedule,planDocument.markdown)+
-            "\nNative Pi subagent: "+(ready?"AVAILABLE":"NOT AVAILABLE; direct Lead fallback only")+
-            "\nCall jev_delegate(action=run) to execute a Builder wave. Verify its results and mark checklist steps done before the next wave."}],
-            details:{schedule,nativeSubagentAvailable:ready}};
+            "\nNative Pi subagent: "+(nativeAvailable?"AVAILABLE":"NOT AVAILABLE")+
+            (fallback?" · pending Builder waves switched to Lead. NO Builder was spawned.":
+             !nativeAvailable?" · Always Delegate prevents automatic Lead fallback; change the strategy if needed.":"")+
+            "\nCall jev_delegate(action=run) for the next wave, verify actual work and report it with jev_progress."}],
+            details:{schedule,nativeSubagentAvailable:nativeAvailable}};
         }
         if(!delegationSchedule || delegationSchedule.version!==implementationProgress.version)
           throw Error("Create a delegation schedule first (jev_delegate action=plan).");
-        const next=nextDelegationWave(delegationSchedule,implementationProgress);
+        if(params.action==="lead"){
+          if(config.strategy==="always")throw Error("Always Delegate is enabled. Change execution strategy to Prefer or Direct before Lead fallback.");
+          const updated=fallbackDelegationToLead(delegationSchedule,implementationProgress,
+            params.reason,{allowErroredRun:true,allowStrategyChange:true});
+          if(updated===delegationSchedule)
+            return {content:[{type:"text",text:"No unfinished Builder waves need Lead fallback."}],details:delegationSchedule};
+          saveSchedule(updated);
+          return {content:[{type:"text",text:"Pending Builder waves switched to audited Lead fallback. NO Builder success was recorded. Inspect any partial changes, implement outstanding steps directly, verify files/tests, then use jev_progress.\n"+
+            scheduleInstructions(updated,planDocument.markdown)}],details:{schedule:updated,execution:"lead"}};
+        }
         if(params.action==="status"){
-          const text=next
-            ?scheduleInstructions({...delegationSchedule,waves:delegationSchedule.waves.slice(next.index)},
-              planDocument.markdown):"All scheduled waves are verified.";
-          return {content:[{type:"text",text}],details:delegationSchedule};
+          const next=nextDelegationWave(delegationSchedule,implementationProgress);
+          const message=next?scheduleInstructions({...delegationSchedule,
+            waves:delegationSchedule.waves.slice(next.index)},planDocument.markdown):"All scheduled waves are verified.";
+          return {content:[{type:"text",text:message}],details:delegationSchedule};
         }
         if(params.action!=="run")throw Error("Unknown delegation action");
+        if(!nativeAvailable && config.strategy!=="always"){
+          const updated=fallbackDelegationToLead(delegationSchedule,implementationProgress,unavailableReason,
+            {allowStrategyChange:true});
+          if(updated!==delegationSchedule)saveSchedule(updated);
+        }
+        const next=nextDelegationWave(delegationSchedule,implementationProgress);
         if(!next)
           return {content:[{type:"text",text:"All scheduled tasks have been verified by the Lead."}]};
         const {index,wave}=next;
         if(wave.execution==="lead"){
           return {content:[{type:"text",text:"Wave "+(index+1)+
-            " is a direct Lead task. Do it in this session, verify it, then use jev_progress. "+
+            " is a direct Lead task"+(delegationSchedule.fallbacks?.some(f=>f.wave===index)
+              ?" (fallback: no Builder execution was credited)":"")+
+            ". Complete it in this session, verify it, then use jev_progress. "+
             wave.tasks.map(t=>"#"+t.stepId+" "+t.title).join("; ")}],
             details:{wave:index+1,execution:"lead"}};
         }
-        const registered=typeof pi.getAllTools==="function"
-          && pi.getAllTools().some(t=>t.name==="subagent");
-        if(!registered || typeof (ctx as any).executeTool!=="function"){
+        if(!nativeAvailable){
           return {isError:true,content:[{type:"text",
-            text:"Pi native subagent extension unavailable. NO Builder was spawned. "+
-            "Install/enable Pi's official subagent extension with a user-level "+
-            config.builderAgent+" agent profile, then /reload; or implement the wave "+
-            "directly in Lead and verify each step. Never claim delegation happened."}]};
+            text:"Pi native subagent unavailable. NO Builder was spawned. Always Delegate is enabled: change strategy to Prefer/Direct or enable Pi subagent, then /reload. Do not claim a Builder result."}]};
         }
         const tasks=wave.tasks.map(t=>({
           agent:delegationSchedule!.builderAgent,
@@ -1343,14 +1371,30 @@ export default function (pi: ExtensionAPI) {
           {tasks,agentScope:"user"};
         if(ctx.hasUI)ctx.ui.setStatus("jev-builders",
           "Jev BUILDERS · "+tasks.length+" running · wave "+(index+1));
+        const noSpawn=(message:string)=>/\b(?:no builder was spawned|no subagent was spawned|native pi subagent (?:extension )?unavailable)\b/i.test(message);
+        const switchToLead=(reason:string)=>{
+          if(config.strategy==="always")return {isError:true,content:[{type:"text",text:
+            "NO Builder was spawned. Always Delegate is enabled; switch to Prefer/Direct or enable your Pi subagent before retrying."}]};
+          const updated=fallbackDelegationToLead(delegationSchedule!,implementationProgress!,
+             "Native Pi subagent returned no spawned Builder: "+reason.slice(0,130),
+            {allowStrategyChange:true});
+          saveSchedule(updated);
+          return {content:[{type:"text",text:"NO Builder was spawned. Switched unfinished Builder waves to audited Lead fallback. Implement and verify each task directly, then call jev_progress with factual verification.\n"+
+            scheduleInstructions(updated,planDocument!.markdown)}],details:{execution:"lead",schedule:updated}};
+        };
         let result:any;
         try {
           result=await (ctx as any).executeTool("subagent",call,{signal,onUpdate});
+        } catch(error){
+          const message=error instanceof Error?error.message:String(error);
+          if(noSpawn(message))return switchToLead(message);
+          throw error;
         } finally {
           if(ctx.hasUI)ctx.ui.setStatus("jev-builders",undefined);
         }
         const content=Array.isArray(result?.content)?result.content.filter(
           (c:any)=>c.type==="text").map((c:any)=>String(c.text)).join("\n"):"";
+        if(noSpawn(content))return switchToLead(content);
         const failed=result?.isError===true || !Array.isArray(result?.content)
           || !content.trim();
         const status=failed?"error":"reported";

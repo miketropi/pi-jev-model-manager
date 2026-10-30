@@ -51,6 +51,38 @@ export interface DelegationRun {
  summary:string;
  at:string;
 }
+/** Convert unfinished Builder waves to explicit Lead execution, without inventing
+ * successful subagent results or marking any checklist item completed.
+ * An actual reported Builder result is never silently replaced.
+ */
+export function fallbackDelegationToLead(
+ schedule:DelegationSchedule,progress:Progress,reason:string,
+ options:{allowErroredRun?:boolean;allowStrategyChange?:boolean}={},date=new Date()
+):DelegationSchedule {
+ if(schedule.version!==progress.version)throw Error("Delegation is for a different plan version");
+ if(schedule.strategy==="always"&&!options.allowStrategyChange)throw Error("Always Delegate is enabled. Change delegation strategy to Prefer or Direct before Lead fallback.");
+ if(typeof reason!=="string"||reason.trim().length<12)
+  throw Error("Lead fallback needs a factual reason (minimum 12 characters).");
+ const trimmed=reason.trim().slice(0,240);
+ const changed:number[]=[];
+ const waves=schedule.waves.map((wave,i)=>{
+  if(wave.execution!=="builder"||wave.tasks.every(t=>
+     progress.steps.find(s=>s.id===t.stepId)?.status==="done"))return wave;
+  const attempt=schedule.runs?.find(r=>r.wave===i);
+  if(attempt?.status==="reported")
+   throw Error("Builder wave "+(i+1)+" already reported output; inspect and verify it before switching execution.");
+  if(attempt?.status==="error"&&!options.allowErroredRun)
+   throw Error("Builder wave "+(i+1)+" failed; inspect possible partial changes and explicitly request Lead fallback.");
+  changed.push(i);
+  return {...wave,execution:"lead" as const,
+   tasks:wave.tasks.map(t=>({...t,execution:"lead" as const,reason:"Lead fallback: "+trimmed}))};
+ });
+ if(!changed.length)return schedule;
+ return {...schedule,waves,fallbacks:[
+   ...(schedule.fallbacks??[]),
+   ...changed.map(wave=>({wave,reason:trimmed,at:date.toISOString()}))
+ ]};
+}
 export function nextDelegationWave(schedule:DelegationSchedule,progress:Progress):
  {index:number;wave:Wave}|undefined {
  if(schedule.version!==progress.version)throw Error("Delegation is for a different plan version");
@@ -58,16 +90,17 @@ export function nextDelegationWave(schedule:DelegationSchedule,progress:Progress
   const wave=schedule.waves[i];
   const statuses=wave.tasks.map(t=>progress.steps.find(s=>s.id===t.stepId)?.status);
   if(statuses.every(s=>s==="done"))continue;
-  if(statuses.some(s=>s==="done"))
-   throw Error("Partially verified wave: verify remaining tasks before continuing");
-  for(const task of wave.tasks){
+  if(statuses.some(s=>s==="done") && wave.execution==="builder")
+   throw Error("Partially verified Builder wave: verify remaining tasks before continuing");
+  const pending=wave.tasks.filter(t=>progress.steps.find(s=>s.id===t.stepId)?.status!=="done");
+  for(const task of pending){
    for(const dep of task.dependsOn)
     if(progress.steps.find(s=>s.id===dep)?.status!=="done")
      throw Error("Dependency #"+dep+" has not been verified by Lead");
   }
-  if(schedule.runs?.some(r=>r.wave===i))
+  if(wave.execution==="builder" && schedule.runs?.some(r=>r.wave===i))
    throw Error("Wave "+(i+1)+" was already dispatched. Verify results before any retry.");
-  return {index:i,wave};
+  return {index:i,wave:wave.execution==="lead"?{...wave,tasks:pending}:wave};
  }
 }
 export function recordDelegationRun(schedule:DelegationSchedule, wave:number,

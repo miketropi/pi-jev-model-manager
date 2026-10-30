@@ -449,7 +449,7 @@ Jev now defaults to **Prefer Subagents**, with at most **2 concurrent Builders**
 
 **The native `subagent` extension is optional and is not bundled by Jev.** Install/enable the official Pi example from [Pi's subagent extension](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/subagent) following its upstream README. Ensure a user-level agent profile named `worker` exists at `~/.pi/agent/agents/worker.md`, or select a different installed user-level agent in `/jev-config`. Pi's subagent extension uses user-level agents by default; Jev explicitly sends `agentScope: "user"` to avoid loading untrusted project-local agent definitions. The worker profile controls its model and tools.
 
-Use `/reload` after installing the Pi subagent extension. Run `/jev-delegation` to verify that the native tool is available. If missing, Jev will report **NO Builder was spawned** and the Lead can complete the task directly; it will never pretend to have delegated work. Native execution is only available on Pi builds supporting nested tool invocation via `ctx.executeTool`.
+Use `/reload` after installing the Pi subagent extension. Run `/jev-delegation` to verify that the native tool is available. In **Prefer Subagents**, if the native subagent is unavailable or explicitly reports **NO Builder was spawned**, Jev automatically records an **audited Lead fallback** for unfinished Builder waves. A completed Lead task can then be marked `done` with factual verification evidence (minimum 12 characters), without fabricating a Builder result. Native execution is only available on Pi builds supporting nested tool invocation via `ctx.executeTool`.
 
 ### Configuration
 
@@ -483,6 +483,16 @@ APPROVED PLAN → Implementation Session (Lead)
 Jev's `jev_delegate` tool invokes the native Pi tool through `ctx.executeTool("subagent", ...)`. Execution can be a single Builder or a parallel batch of at most two. The scheduler rejects invalid paths, duplicate step IDs, unresolved dependencies and cycles; it serializes overlapping directories and unknown file scopes. A running wave is recorded in the Pi session (including an abbreviated result), and **cannot be retried silently**. A later wave cannot launch until previous dependencies have been marked done with verification by Lead. Parent `jev_progress` rejects marking a delegated step done if the subagent tool did not return a non-error result. Even a non-error response **does not automatically mark anything done**.
 
 Use `/jev-delegation` to inspect strategy, native tool availability and scheduled waves. The normal `/jev-pipeline-status` and `/jev-pipeline-resume` remain valid for Auto QA/Review. Restarting a completed implementation clears the old delegation record.
+
+### Recover a blocked checklist after Builder could not spawn (v0.10.1)
+
+A previous schedule can contain Builder-assigned steps when Pi has no working subagent. After updating and running `/reload`, stay in `/jev-implement` and call `jev_delegate(action=run)`; **Prefer Subagents** now converts unfinished Builder waves into Lead tasks instead of permanently blocking `jev_progress`. Alternatively, call the **model-facing tool** `jev_delegate(action=lead, reason="Native Pi reported NO Builder was spawned; Lead inspected files and tests")` for audited manual recovery. It also supports failed Builder tool calls after inspecting any partial changes.
+
+Fallback changes task ownership and records the reason in the Pi session. It **never marks a step done automatically**. Lead must call `jev_progress(action=update, stepId=N, status=done, note="Verified changes and focused tests...")` with factual evidence for each completed step, including formerly `blocked` steps. Auto QA begins only when every step is verified. Review follows only after QA passes.
+
+**Always Delegate** refuses automatic Lead fallback; switch strategy to Prefer or Direct if direct execution is acceptable. A real reported Builder run cannot be silently overwritten.
+
+
 
 **Isolation limits:** Each Pi Builder gets its own conversation context, but children still share the same repository working tree. The file scopes in task prompts are policy instructions, **not filesystem sandbox permissions**; subagents could modify files outside the declared scope. Always review the git diff and test results. For strong write isolation use separate Git worktrees. Pi may impose additional limits on concurrency and model availability. A spawned process may also consume extra tokens; Jev mainly reduces the Lead's context pressure rather than guaranteeing cost savings.
 

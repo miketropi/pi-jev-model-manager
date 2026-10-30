@@ -158,9 +158,59 @@ test("Auto Implement -> QA -> Review advances only after verified tool results",
   const beforeMissing=delegatedCalls.length;
   const noSpawn=await tools.jev_delegate.execute("missing-run",{action:"run"},
     undefined,undefined,ctx);
-  assert.equal(noSpawn.isError,true);
-  assert.match(noSpawn.content[0].text,/NO Builder was spawned/);
-  assert.equal(delegatedCalls.length,beforeMissing);
+  assert.equal(noSpawn.isError,undefined,"Prefer strategy should support audited Lead execution");
+  assert.match(noSpawn.content[0].text,/Lead task/);
+  assert.equal(delegatedCalls.length,beforeMissing,"unavailable native subagent was never invoked");
+  const fallbackEntries=()=>entries.filter(e=>e.customType==="jev-implementation-delegation").at(-1)?.data;
+  assert.equal(fallbackEntries().waves[0].execution,"lead");
+  assert.equal(fallbackEntries().runs,undefined,"no Builder success was fabricated");
+  assert.ok(fallbackEntries().fallbacks[0].reason.includes("unavailable"));
+  const shortNote=await tools.jev_progress.execute("short-evidence",{
+    action:"update",stepId:1,status:"done",note:"ok"
+  },undefined,undefined,ctx);
+  assert.equal(shortNote.isError,true,"fallback requires meaningful completion evidence");
+  const completed=await tools.jev_progress.execute("lead-verified",{
+    action:"update",stepId:1,status:"done",
+    note:"Lead inspected donation validation, ran tests and verified the changes."
+  },undefined,undefined,ctx);
+  assert.equal(completed.isError,undefined);
+  // Registered subagent tools may still fail to spawn. That failure must not
+  // be recorded as a Builder success, even if returned with nonempty text.
+  tools.subagent={name:"subagent"};
+  ctx.executeTool=async()=>({isError:true,content:[{type:"text",text:"NO Builder was spawned"}]});
+  const blocked=await tools.jev_progress.execute("blocked",{
+    action:"update",stepId:2,status:"blocked",note:"Agent unavailable"
+  },undefined,undefined,ctx);
+  assert.equal(blocked.isError,undefined);
+  const remaining=await tools.jev_delegate.execute("subagent-plan",{
+    action:"plan",tasks:[{stepId:2,files:["src/blocks/donate.ts"],dependsOn:[1],effort:"large"}]
+  },undefined,undefined,ctx);
+  assert.equal(remaining.isError,undefined);
+  assert.equal(remaining.details.schedule.waves[0].execution,"builder");
+  const unspawned=await tools.jev_delegate.execute("no-builder-result",{action:"run"},
+    undefined,undefined,ctx);
+  assert.equal(unspawned.isError,undefined);
+  assert.match(unspawned.content[0].text,/NO Builder was spawned/);
+  assert.equal(fallbackEntries().waves[0].execution,"lead");
+  assert.equal(fallbackEntries().runs,undefined,"a textual no-spawn failure is not a Builder run");
+  const leadResult=await tools.jev_progress.execute("lead-step-2",{
+    action:"update",stepId:2,status:"done",
+    note:"Lead verified the completed donation UI with focused regression tests."
+  },undefined,undefined,ctx);
+  assert.equal(leadResult.isError,undefined,"blocked steps may be verified after Lead fallback");
+  assert.equal(leadResult.details.stage,"complete");
+  await events.agent_settled({},ctx);
+  assert.equal(latest().phase,"qa","finished Lead fallback must allow Auto QA");
+  await tools.jev_quality_gate.execute("lead-qa",{
+    outcome:"pass",evidence:"QA ran donation acceptance tests after Lead fallback"
+  },undefined,undefined,ctx);
+  await events.agent_settled({},ctx);
+  assert.equal(latest().phase,"review");
+  await tools.jev_quality_gate.execute("lead-review",{
+    outcome:"pass",evidence:"Review inspected final diff, scope and security checks"
+  },undefined,undefined,ctx);
+  await events.agent_settled({},ctx);
+  assert.equal(latest().status,"completed");
  }finally{
   if(previous===undefined)delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR=previous;
