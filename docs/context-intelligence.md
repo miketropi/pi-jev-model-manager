@@ -44,3 +44,5 @@ Run: npm test
 - `context/extension.ts`: Pi commands/tools adapter, separate from storage.
 
 Telemetry currently exposes pure functions; no Pi event hook has been attached and no live measurements are claimed.
+
+- `context/scoring.ts`: semantic evaluator interface, timeout validation and fail-safe context actions. Currently requires an injected evaluator; live Jev API is not connected.
