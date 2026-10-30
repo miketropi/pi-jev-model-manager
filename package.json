@@ -7,7 +7,7 @@
   "pi": {
     "extensions": [
       "./index.ts",
-      "./context-extension.ts"
+      "./context/extension.ts"
     ],
     "skills": [
       "./skills"

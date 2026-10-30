@@ -35,3 +35,12 @@ When PI_CODING_AGENT_DIR is set, put the file there instead.
 6. Shadow-mode evaluation with recall and token-cache metrics, then gated rollout.
 
 Run: npm test
+
+## Refactor layout
+- `index.ts`: legacy runtime composition; refactoring incrementally to avoid regressions.
+- `core/config.ts`: canonical routing configuration and types.
+- `context/store.ts`: archive, retrieval, policy and context budget primitives.
+- `context/telemetry.ts`: validated observations, warning levels, model switch compatibility primitives.
+- `context/extension.ts`: Pi commands/tools adapter, separate from storage.
+
+Telemetry currently exposes pure functions; no Pi event hook has been attached and no live measurements are claimed.

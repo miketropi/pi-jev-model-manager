@@ -1,6 +1,6 @@
 /** Opt-in context archive and retrieval; no mutation of Pi conversation history. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { archiveContext, contextBudget, DEFAULT_CONTEXT_CONFIG, loadContext, normalizeContextConfig, readContext, searchContext, type ContextKind } from "./context-intelligence.ts";
+import { archiveContext, DEFAULT_CONTEXT_CONFIG, loadContext, normalizeContextConfig, readContext, searchContext, type ContextKind } from "./store.ts";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";

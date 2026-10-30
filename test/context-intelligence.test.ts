@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 const tmp=mkdtempSync(join(tmpdir(),"jev-context-test-"));
 process.env.PI_CODING_AGENT_DIR=tmp;
-const m=await import("../context-intelligence.ts");
+const m=await import("../context/store.ts");
 test("protected context is never discarded by policy",()=>{
  assert.equal(m.decideContextAction({kind:"checkpoint",duplicate:true,relevance:0}),"keep");
  assert.equal(m.decideContextAction({kind:"tool-output",protected:true,duplicate:true}),"keep");
