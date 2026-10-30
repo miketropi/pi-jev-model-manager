@@ -11,6 +11,7 @@ import { classifierModelGuidance, effectiveModelProfile, knownModelProfile } fro
 import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
 import { registerPlanningTools, fetchPublicText } from "./planning-tools.ts";
+import { registerHerdrPlanningTool, HERDR_PLAN_TOOL } from "./herdr-collaboration.ts";
 import { matchingSkills, skillGuidance, type LoadedSkill } from "./skill-routing.ts";
 import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, extractPlanText, latestPlanFromBranch, planPreview, implementationHandoff, type PlanDocument } from "./plan-artifact.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
@@ -929,7 +930,10 @@ export default function (pi: ExtensionAPI) {
   robotFrame = 0;
   robotAnimator = new RobotMotion(paintRobot);
   // Register read-only research and interactive choice tools at startup.
-  if (typeof pi.registerTool === "function") registerPlanningTools(pi);
+  if (typeof pi.registerTool === "function"){
+    registerPlanningTools(pi);
+    registerHerdrPlanningTool(pi);
+  }
   let lastDecision: Decision | undefined;
   let workflowTask: TaskType | undefined;
   let toolsBeforeStrictPhase: string[] | undefined;
@@ -1172,6 +1176,9 @@ export default function (pi: ExtensionAPI) {
 
 
   function changeWorkflow(task: TaskType | undefined): void {
+    if (workflowTask==="plan" && task!=="plan"){
+      pi.setActiveTools(pi.getActiveTools().filter(n=>n!==HERDR_PLAN_TOOL));
+    }
     if (workflowTask === "implement" && task !== "implement") {
       const remove=[
         ...qaRecoveryToolsInjected,
@@ -1199,6 +1206,7 @@ export default function (pi: ExtensionAPI) {
       const registered = typeof pi.getAllTools === "function"
         ? new Set(pi.getAllTools().map(tool => tool.name)) : new Set<string>();
       const additions = ["jev_web_fetch", "jev_ask_user",
+        ...(task==="plan"?[HERDR_PLAN_TOOL]:[]),
         ...(task === "review" && autoPipeline?.phase === "review" ? ["jev_quality_gate"] : [])]
         .filter(name => registered.has(name) && !toolsBeforeStrictPhase!.includes(name));
       if (additions.includes("jev_quality_gate")) pipelineGateInjected = true;
@@ -1207,6 +1215,10 @@ export default function (pi: ExtensionAPI) {
       pi.setActiveTools(toolsBeforeStrictPhase);
       toolsBeforeStrictPhase = undefined;
     }
+    if(task==="plan"&&typeof pi.getAllTools==="function" &&
+      pi.getAllTools().some(t=>t.name===HERDR_PLAN_TOOL) &&
+      !pi.getActiveTools().includes(HERDR_PLAN_TOOL))
+      pi.setActiveTools([...pi.getActiveTools(),HERDR_PLAN_TOOL]);
     workflowTask = task;
   }
 
@@ -1652,7 +1664,12 @@ export default function (pi: ExtensionAPI) {
         toolsBeforeStrictPhase = Array.isArray(saved.toolsBeforeStrictPhase)
           ? saved.toolsBeforeStrictPhase.filter((x: unknown) => typeof x === "string")
           : pi.getActiveTools();
-        pi.setActiveTools(toolsForPhase(pi.getActiveTools(), workflowTask!));
+        const available=typeof pi.getAllTools==="function" &&
+          pi.getAllTools().some(t=>t.name===HERDR_PLAN_TOOL);
+        const configured=pi.getActiveTools();
+        pi.setActiveTools(toolsForPhase(
+          workflowTask==="plan" && available && !configured.includes(HERDR_PLAN_TOOL)
+            ? [...configured,HERDR_PLAN_TOOL] : configured, workflowTask!));
       }
     }
     if(workflowTask==="implement" && typeof pi.getAllTools==="function"){

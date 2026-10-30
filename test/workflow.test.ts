@@ -96,10 +96,16 @@ test("Pi commands enforce planning restrictions and route explicit intent", asyn
     await cmds["jev-plan"].handler("Plan a Gutenberg donation block",ctx);
     assert.equal(prompts.at(-1),"Plan a Gutenberg donation block");
     assert.equal(selected.id,"auto");
-    assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user"]);
+    assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user","jev_herdr"]);
     assert.equal(entries.at(-1).data.task,"plan");
     assert.ok(registered.find(t=>t.name==="jev_ask_user"));
     assert.ok(registered.find(t=>t.name==="jev_web_fetch"));
+    assert.ok(registered.find(t=>t.name==="jev_herdr"));
+    assert.equal((await events.tool_call({toolName:"jev_herdr",input:{action:"list"}},ctx))?.block,undefined);
+    assert.equal((await events.tool_call({toolName:"bash",input:{command:"herdr agent list"}},ctx))?.block,undefined);
+    assert.equal(events.user_bash({command:"herdr agent get researcher"}),undefined);
+    assert.equal((await events.tool_call({toolName:"bash",input:{command:"herdr agent prompt researcher hello"}},ctx))?.block,true);
+    assert.equal(events.user_bash({command:"herdr pane run w1:p1 touch file"}).result.exitCode,1);
     assert.equal((await events.tool_call({toolName:"jev_ask_user",input:{}},ctx))?.block,undefined);
     assert.equal((await events.tool_call({toolName:"jev_web_fetch",input:{}},ctx))?.block,undefined);
     const injected=events.before_agent_start({systemPrompt:"Original Pi instructions"},ctx);
@@ -120,6 +126,7 @@ test("Pi commands enforce planning restrictions and route explicit intent", asyn
 
     await cmds["jev-review"].handler("Review existing code",ctx);
     assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user"]);
+    assert.equal((await events.tool_call({toolName:"jev_herdr",input:{action:"list"}},ctx))?.block,true);
     await cmds["jev-implement"].handler("Implement approved donation block",ctx);
     assert.deepEqual(active,[...original,"jev_delegate","jev_progress"]);
     assert.equal((await events.tool_call({toolName:"write",input:{path:"x.ts"}},ctx))?.block,undefined);
@@ -130,10 +137,10 @@ test("Pi commands enforce planning restrictions and route explicit intent", asyn
     assert.equal(classifierCalls,0);
 
     await cmds["jev-plan"].handler("",ctx);
-    assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user"]);
+    assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user","jev_herdr"]);
     assert.equal(prompts.length,3,"no-argument commands should not start turns");
     await events.session_start({reason:"reload"},ctx);
-    assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user"]);
+    assert.deepEqual(active,["read","bash","grep","find","ls","jev_web_fetch","jev_ask_user","jev_herdr"]);
     await cmds["jev-auto"].handler("",ctx);
     assert.deepEqual(active,original);
     assert.equal(entries.at(-1).data.task,null);

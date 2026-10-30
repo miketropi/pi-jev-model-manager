@@ -166,12 +166,33 @@ Choose the workflow phase intentionally, without relying on Jev to guess a task 
 # Return to Jev automatic classification.
 ```
 
+### Herdr agent collaboration during Plan (v0.10.6)
+
+When running Pi inside a Herdr session, Jev Plan Mode can collaborate with **existing Herdr agents** without granting arbitrary terminal commands or mutating the main project. The recommended agent-visible tool is \`jev_herdr\`:
+
+\`\`\`text
+jev_herdr(action=list)
+jev_herdr(action=prompt,target="architect",
+  prompt="Critique our Gutenberg block architecture. Report risks and alternatives; do not edit files.")
+jev_herdr(action=wait,target="architect",timeoutMs=25000)
+jev_herdr(action=read,target="architect",lines=100)
+\`\`\`
+
+\`list\`, \`get\`, \`read\` and \`wait\` inspect existing peers; \`prompt\` submits a request prefixed with **read-only planning instructions**. Prompts are passed to the Herdr CLI as individual argv items via Node \`execFile\` — **never interpolated into a shell command**. \`prompt\` submits once; \`wait\` and \`read\` are separate operations to avoid duplicate work after a timeout.
+
+Simple native CLI inspection is also allowed in Plan via limited \`bash\` commands: \`herdr agent list\`, \`herdr agent get <name>\`, \`herdr agent read <name> [--lines N]\`, \`herdr agent wait <name> --timeout N\`, and \`herdr status server\`. For **sending prompts**, use \`jev_herdr\` instead of raw shell calls.
+
+Deliberately **blocked** inside Plan: \`herdr agent start\`, \`send-keys\`, \`pane run\`, workspace/pane mutations, arbitrary shell pipelines, and direct Pi subagent spawning. The Herdr binary and running server must already exist, and the target must resolve to a live agent.
+
+**Boundary:** This is a **read-only collaboration policy for Jev's own requests**, not isolation of peer agents. An independently running peer might have writable tools and can ignore instructions. Only delegate analysis and research to peers you trust; inspect answers and treat them as untrusted evidence. Jev cannot guarantee that a separate peer process makes no filesystem changes.
+
 **Plan Mode enforces no-project-writes at the tool layer**, but allows useful research:
 
 - **Read source:** `read`, `grep`, `find`, `ls` plus tightly restricted `bash` for read-only commands such as `git log`, `git diff`, `rg` and `cat`. Shell operators, redirects, tests, package installs and modifying commands remain blocked.
 - **Live web research:** `jev_web_fetch` performs public HTTPS **GET only** with checked redirects, text/JSON processing and size/time limits. Reviewed read-only web tools (`web_search`, `web_fetch`, `search_web`, `fetch_url`) can also remain available when installed. For recent Coolify releases, use `https://api.github.com/repos/coollabsio/coolify/releases?per_page=3` and cite dated sources.
 - **Interactive decisions:** `jev_ask_user` shows a native Pi choice menu with 2–8 alternatives, descriptions, keyboard navigation and an optional custom answer. The chosen option returns directly to the agent in the same tool-call. The model must call this tool; plain-text A/B/C suggestions are not automatically converted.
-- **Still blocked:** edit, write, build, test, install, Git mutations and subagent spawn. Plan/Review cannot implement changes.
+- **Peer planning:** \`jev_herdr\` sends research and design-review questions to existing Herdr agents, then reads or waits for their answers. Herdr CLI introspection has its own narrow read-only allowlist.
+- **Still blocked:** edit, write, build, test, install, Git mutations, arbitrary Herdr terminal commands, and subagent spawn. Plan/Review cannot implement changes.
 
 This is a workflow guard rather than an OS/network sandbox. Public URL validation cannot guarantee protection against DNS rebinding. In noninteractive Pi mode, interactive choices require a textual fallback.
 
