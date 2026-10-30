@@ -1279,8 +1279,14 @@ export default function (pi: ExtensionAPI) {
             const waveIndex=delegationSchedule.waves.findIndex(w=>w.execution==="builder" &&
               w.tasks.some(t=>t.stepId===params.stepId));
             if(waveIndex>=0 && !delegationSchedule.runs?.some(r=>
-              r.wave===waveIndex && r.status==="reported"))
-              throw Error("Builder step has no successful subagent tool result. Use jev_delegate(action=run), or jev_delegate(action=lead,reason=...) for audited direct Lead fallback; then verify the work.");
+              r.wave===waveIndex && r.status==="reported")){
+              const attempt=delegationSchedule.runs?.find(r=>r.wave===waveIndex);
+              throw Error("Builder wave "+(waveIndex+1)+" has "+
+                (attempt?.status==="error"?"a recorded error":"no successful subagent report")+
+                ". Inspect partial edits and verify them before recovery. "+
+                "Use jev_delegate(action=lead,wave="+(waveIndex+1)+
+                ",reason=...) in Prefer/Direct, then mark done with factual evidence.");
+            }
             const leadFallback=delegationSchedule.fallbacks?.some(f=>
               delegationSchedule!.waves[f.wave]?.tasks.some(t=>t.stepId===params.stepId));
             if(leadFallback && (typeof params.note!=="string"||params.note.trim().length<12))
@@ -1339,6 +1345,7 @@ export default function (pi: ExtensionAPI) {
     parameters:{type:"object",required:["action"],additionalProperties:false,properties:{
       action:{type:"string",enum:["plan","run","lead","status"]},
         reason:{type:"string",minLength:12,maxLength:240},
+        wave:{type:"integer",minimum:1},
       tasks:{type:"array",maxItems:16,items:{type:"object",required:["stepId","files","dependsOn","effort"],
         additionalProperties:false,properties:{
           stepId:{type:"integer"},files:{type:"array",items:{type:"string"},maxItems:24},
@@ -1379,8 +1386,12 @@ export default function (pi: ExtensionAPI) {
           throw Error("Create a delegation schedule first (jev_delegate action=plan).");
         if(params.action==="lead"){
           if(config.strategy==="always")throw Error("Always Delegate is enabled. Change execution strategy to Prefer or Direct before Lead fallback.");
+          const waveNumber=params.wave===undefined?undefined:Number(params.wave);
+          if(waveNumber!==undefined && (!Number.isInteger(waveNumber)||waveNumber<1))
+            throw Error("Supply a one-based positive wave number.");
           const updated=fallbackDelegationToLead(delegationSchedule,implementationProgress,
-            params.reason,{allowErroredRun:true,allowStrategyChange:true});
+            params.reason,{allowErroredRun:true,allowStrategyChange:true,
+              wave:waveNumber===undefined?undefined:waveNumber-1});
           if(updated===delegationSchedule)
             return {content:[{type:"text",text:"No unfinished Builder waves need Lead fallback."}],details:delegationSchedule};
           saveSchedule(updated);
@@ -1388,9 +1399,21 @@ export default function (pi: ExtensionAPI) {
             scheduleInstructions(updated,planDocument.markdown)}],details:{schedule:updated,execution:"lead"}};
         }
         if(params.action==="status"){
-          const next=nextDelegationWave(delegationSchedule,implementationProgress);
-          const message=next?scheduleInstructions({...delegationSchedule,
-            waves:delegationSchedule.waves.slice(next.index)},planDocument.markdown):"All scheduled waves are verified.";
+          // Inspect even if an earlier Builder wave is already dispatched or
+          // errored. nextDelegationWave intentionally refuses unsafe reruns.
+          const outstanding=delegationSchedule.waves.map((wave,i)=>{
+            const pending=wave.tasks.filter(t=>
+              implementationProgress!.steps.find(s=>s.id===t.stepId)?.status!=="done");
+            if(!pending.length)return undefined;
+            const run=delegationSchedule!.runs?.find(r=>r.wave===i);
+            return "Wave "+(i+1)+" · "+wave.execution.toUpperCase()+
+              " · "+(run?.status??"not dispatched")+
+              " · steps "+pending.map(t=>"#"+t.stepId).join(", ")+
+              (delegationSchedule!.fallbacks?.some(f=>f.wave===i)?" · audited Lead fallback":"");
+          }).filter(Boolean);
+          const message=scheduleInstructions(delegationSchedule,planDocument.markdown)+
+            "\n"+(outstanding.length?"Pending: \n"+outstanding.join("\n"):
+              "All scheduled waves are verified.");
           return {content:[{type:"text",text:message}],details:delegationSchedule};
         }
         if(params.action!=="run")throw Error("Unknown delegation action");
@@ -1436,13 +1459,41 @@ export default function (pi: ExtensionAPI) {
           return {content:[{type:"text",text:"NO Builder was spawned. Switched unfinished Builder waves to audited Lead fallback. Implement and verify each task directly, then call jev_progress with factual verification.\n"+
             scheduleInstructions(updated,planDocument!.markdown)}],details:{execution:"lead",schedule:updated}};
         };
+        // Missing Builder output can coexist with partial file writes. Never
+        // credit a successful run or retry that wave without verification.
+        const recoverError=(explanation:string,details?:unknown)=>{
+          const errored=recordDelegationRun(delegationSchedule!,index,"error",explanation);
+          const steps=wave.tasks.map(t=>"#"+t.stepId).join(", ");
+          if(config.strategy!=="always" && !signal?.aborted){
+            const updated=fallbackDelegationToLead(errored,implementationProgress!,
+              "Builder wave "+(index+1)+" had an unverified result: "+explanation.slice(0,140),
+              {allowErroredRun:true,wave:index});
+            saveSchedule(updated);
+            return {content:[{type:"text",text:"Builder wave "+(index+1)+" ERROR · "+steps+
+              " · "+explanation+
+              "\nRecovered ONLY this wave to audited Lead execution. NO successful Builder result recorded; NO checklist step auto-completed. "+
+              "Lead must inspect partial edits, verify source evidence and tests, finish missing work, "+
+              "then call jev_progress(action=update,status=done) with a factual verification note. "+
+              "Future pending Builder waves remain delegated."}],
+              details:{wave:index+1,status:"lead-verification-required",builderStatus:"error",
+                delegation:updated,subagent:details}};
+          }
+          saveSchedule(errored);
+          return {isError:true,content:[{type:"text",text:"Builder wave "+(index+1)+" ERROR · "+steps+
+            " · "+explanation+
+            "\nNo Builder success recorded; checklist remains unverified. "+
+            (signal?.aborted?"Run was aborted; inspect partial edits before any recovery.":
+              "Always Delegate is enabled. Switch to Prefer/Direct and call "+
+              "jev_delegate(action=lead,wave="+(index+1)+",reason=...) after inspecting partial edits.")}],
+            details:{wave:index+1,status:"error",delegation:errored,subagent:details}};
+        };
         let result:any;
         try {
           result=await (ctx as any).executeTool("subagent",call,{signal,onUpdate});
         } catch(error){
           const message=error instanceof Error?error.message:String(error);
           if(noSpawn(message))return switchToLead(message);
-          throw error;
+          return recoverError("Subagent tool threw: "+message.slice(0,350));
         } finally {
           if(ctx.hasUI)ctx.ui.setStatus("jev-builders",undefined);
         }
@@ -1451,15 +1502,16 @@ export default function (pi: ExtensionAPI) {
         if(noSpawn(content))return switchToLead(content);
         const failed=result?.isError===true || !Array.isArray(result?.content)
           || !content.trim();
-        const status=failed?"error":"reported";
-        delegationSchedule=recordDelegationRun(delegationSchedule,index,status,content||"No text returned");
+        if(failed)return recoverError(result?.isError===true
+          ? "Subagent reported an error: "+(content.trim().slice(0,700)||"no text returned")
+          : "Subagent returned no text; partial file edits may exist.",result?.details);
+        delegationSchedule=recordDelegationRun(delegationSchedule,index,"reported",content);
         pi.appendEntry(DELEGATION_ENTRY,delegationSchedule);
-        const summary="Builder wave "+(index+1)+" "+status+
-          " · "+wave.tasks.map(t=>"#"+t.stepId).join(", ")+
-          "\nLEAD MUST inspect changed files and tests. Do not mark checklist done on the basis of a successful process exit alone.\n";
-        return {isError:failed,
-          content:[{type:"text",text:summary+(content||"Subagent returned no text.").slice(0,36000)}],
-          details:{wave:index+1,status,delegation:delegationSchedule,subagent:result?.details}};
+        return {isError:false,content:[{type:"text",text:"Builder wave "+(index+1)+
+          " reported · "+wave.tasks.map(t=>"#"+t.stepId).join(", ")+
+          "\nLEAD MUST inspect changed files and tests before marking done.\n"+
+          content.slice(0,36000)}],
+          details:{wave:index+1,status:"reported",delegation:delegationSchedule,subagent:result?.details}};
       }catch(e){
         return {isError:true,content:[{type:"text",text:e instanceof Error?e.message:String(e)}]};
       }

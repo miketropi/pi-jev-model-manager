@@ -84,3 +84,27 @@ test("Always Delegate and previously reported Builder results cannot be silently
  assert.equal(nextDelegationWave(manual,progress)?.wave.tasks[0].stepId,1);
  assert.throws(()=>fallbackDelegationToLead(schedule,progress,"too short"),/factual reason/);
 });
+
+
+test("errored Builder wave recovery converts only its wave, preserving future Builder delegation",()=>{
+ const original=createDelegationSchedule(progress,[
+  job(1,["src/a.ts"]),job(2,["src/b.ts"],[1]),job(3,["src/c.ts"],[2])],cfg);
+ let verified=changeProgress(progress,1,"done","Lead checked files and passed focused tests.");
+ const failed=recordDelegationRun(original,1,"error","Subagent returned no text");
+ assert.throws(()=>nextDelegationWave(failed,verified),/already dispatched/);
+ const recovered=fallbackDelegationToLead(failed,verified,
+  "Builder returned no report; Lead will inspect any partial file edits",
+  {allowErroredRun:true,wave:1},new Date("2026-10-30T05:00:00Z"));
+ assert.deepEqual(recovered.waves.map(w=>w.execution),["builder","lead","builder"]);
+ assert.equal(recovered.runs?.[0].status,"error","a failed Builder run stays recorded as error");
+ assert.equal(recovered.fallbacks?.length,1);
+ assert.equal(recovered.fallbacks?.[0].wave,1);
+ assert.equal(nextDelegationWave(recovered,verified)?.wave.execution,"lead");
+ verified=changeProgress(verified,2,"done","Lead verified Builder partial changes and all source citations.");
+ assert.equal(nextDelegationWave(recovered,verified)?.wave.execution,"builder");
+ assert.equal(nextDelegationWave(recovered,verified)?.index,2);
+ assert.equal(fallbackDelegationToLead(recovered,verified,
+  "Already audited and recovered", {wave:1,allowErroredRun:true}),recovered);
+ assert.throws(()=>fallbackDelegationToLead(failed,verified,
+  "Invalid wave index", {wave:99,allowErroredRun:true}),/Unknown delegation wave/);
+});

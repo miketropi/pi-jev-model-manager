@@ -44,6 +44,7 @@ export interface DelegationSchedule {
  maxConcurrentBuilders:number;
  builderAgent:string;
  runs?: DelegationRun[];
+ fallbacks?: {wave:number;reason:string;at:string}[];
 }
 export interface DelegationRun {
  wave:number;
@@ -57,15 +58,19 @@ export interface DelegationRun {
  */
 export function fallbackDelegationToLead(
  schedule:DelegationSchedule,progress:Progress,reason:string,
- options:{allowErroredRun?:boolean;allowStrategyChange?:boolean}={},date=new Date()
+ options:{allowErroredRun?:boolean;allowStrategyChange?:boolean;wave?:number}={},date=new Date()
 ):DelegationSchedule {
  if(schedule.version!==progress.version)throw Error("Delegation is for a different plan version");
  if(schedule.strategy==="always"&&!options.allowStrategyChange)throw Error("Always Delegate is enabled. Change delegation strategy to Prefer or Direct before Lead fallback.");
  if(typeof reason!=="string"||reason.trim().length<12)
   throw Error("Lead fallback needs a factual reason (minimum 12 characters).");
+ if(options.wave!==undefined &&
+   (!Number.isInteger(options.wave)||options.wave<0||options.wave>=schedule.waves.length))
+   throw Error("Unknown delegation wave for Lead fallback.");
  const trimmed=reason.trim().slice(0,240);
  const changed:number[]=[];
  const waves=schedule.waves.map((wave,i)=>{
+   if(options.wave!==undefined && options.wave!==i)return wave;
   if(wave.execution!=="builder"||wave.tasks.every(t=>
      progress.steps.find(s=>s.id===t.stepId)?.status==="done"))return wave;
   const attempt=schedule.runs?.find(r=>r.wave===i);

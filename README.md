@@ -488,6 +488,21 @@ Jev's `jev_delegate` tool invokes the native Pi tool through `ctx.executeTool("s
 
 Use `/jev-delegation` to inspect strategy, native tool availability and scheduled waves. The normal `/jev-pipeline-status` and `/jev-pipeline-resume` remain valid for Auto QA/Review. Restarting a completed implementation clears the old delegation record.
 
+### Recover a Builder that returned no text (v0.10.4)
+
+If the native Pi subagent runs but **returns empty text**, a tool error, or throws after possibly editing files, Jev records the Builder run as **error**, never successful. Under **Prefer Subagents**, it immediately transfers **only the failed wave** to audited Lead execution. Other pending Builder waves remain scheduled. The checklist stays incomplete until Lead has inspected partial edits and verified the actual sources/tests. A subprocess exit code or an HTTP 200 response alone is not completion evidence.
+
+The nested tool response explicitly says the wave needs Lead verification, rather than leaving a Builder-assigned step in a deadlocked state. **Always Delegate** keeps the failed wave blocked: change the strategy explicitly before a Lead fallback. An aborted wave is not auto-recovered.
+
+**Existing paused sessions:** update Jev, run `/reload`, enter/restore `/jev-implement` if necessary, then have the Lead invoke:
+
+```text
+jev_delegate(action=lead, wave=3, reason="Builder returned no text; I inspected the partial article edits")
+jev_progress(action=update, stepId=3, status=done, note="Lead checked actual DeepSeek docs content, dates and article citations")
+```
+
+The second call is allowed **only after verification is actually complete**. The one-based `wave` number is the Builder wave index, not necessarily the checklist step ID; if unsure, inspect `jev_delegate(action=status)`. The optional wave argument prevents converting unrelated future Builder tasks. Without it, `action=lead` retains the older behavior of transferring all unfinished waves. This notation refers to model-visible Jev tools, not user-entered Pi slash commands.
+
 ### Recover a blocked checklist after Builder could not spawn (v0.10.1)
 
 A previous schedule can contain Builder-assigned steps when Pi has no working subagent. After updating and running `/reload`, stay in `/jev-implement` and call `jev_delegate(action=run)`; **Prefer Subagents** now converts unfinished Builder waves into Lead tasks instead of permanently blocking `jev_progress`. Alternatively, call the **model-facing tool** `jev_delegate(action=lead, reason="Native Pi reported NO Builder was spawned; Lead inspected files and tests")` for audited manual recovery. It also supports failed Builder tool calls after inspecting any partial changes.
