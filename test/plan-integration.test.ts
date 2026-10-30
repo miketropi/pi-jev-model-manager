@@ -85,11 +85,40 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   assert.equal(active.includes("write"),true);
   assert.ok(tools.jev_progress,"LLM progress tool is registered");
   assert.ok(active.includes("jev_progress"),"Implementation enables progress reporting");
+  // A long checklist must follow the real active task beyond the old #1–#6 cap.
+  const expanded=await tools.jev_progress.execute("extend",
+    {action:"set_steps",steps:Array.from({length:12},(_,i)=>
+      "Meaningful implementation task "+(i+1))},undefined,undefined,ctx);
+  assert.equal(expanded.isError,undefined);
+  const focused=await tools.jev_progress.execute("focus",
+    {action:"update",stepId:10,status:"active"},undefined,undefined,ctx);
+  assert.equal(focused.isError,undefined);
+  let widget=status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1];
+  assert.ok(widget.some(x=>x.startsWith("◉ 10.")),"widget follows active #10");
+  assert.ok(!widget.some(x=>/^[☑◉!☐] 1\. Meaningful implementation task 1$/.test(x)),
+    "first six are not permanently pinned");
+  assert.match(widget[0],/#10\/12/);
+  assert.ok(widget.length<=8);
+  // Native Pi fallback provides a reversible hide/show toggle.
+  const originalSelect=ctx.ui.select;
+  ctx.ui.select=async(_title,choices)=>choices.find(x=>x==="Hide checklist widget");
+  await commands["jev-progress"].handler("",ctx);
+  assert.equal(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1],undefined);
+  ctx.ui.select=async(_title,choices)=>choices.find(x=>x==="Show checklist widget");
+  await commands["jev-progress"].handler("",ctx);
+  widget=status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1];
+  assert.ok(widget.some(x=>x.startsWith("◉ 10.")),"show restores current task");
+  ctx.ui.select=originalSelect;
+  // Restore the original one-step checklist for the existing approval regression.
+  await tools.jev_progress.execute("reset",
+    {action:"set_steps",steps:["Complete the approved deliverable and verify the result"]},
+    undefined,undefined,ctx);
   assert.match(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1]?.[0]??"",/JEV IMPLEMENT/);
   assert.match(sent.at(-1), /IMPLEMENTATION REQUIRED/);
   assert.match(sent.at(-1), /produce the finished article\/content/);
   assert.ok(sent.at(-1).includes("acceptance tests"));
-  assert.equal(entries.at(-1).data.task,"implement");
+  assert.equal(entries.filter(x=>x.customType==="jev-workflow-phase").at(-1)?.data.task,
+    "implement");
   assert.equal(entries.some(x=>x.customType==="jev-auto-pipeline"),false,
     "manual Implement now must not start automatic QA/Review");
   assert.equal(status.filter(x=>x[0]==="jev-plan-summary").at(-1)?.[1],undefined,

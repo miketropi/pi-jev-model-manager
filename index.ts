@@ -21,6 +21,7 @@ import { choosePlanReviewAction } from "./plan-review-ui.ts";
 import { mascotLines, normalizeMascotStyle, MASCOT_WIDGET_KEY, type MascotStyle, type MascotStatus } from "./mascot.ts";
 import { RobotMotion } from "./robot-motion.ts";
 import { PROGRESS_ENTRY, PROGRESS_WIDGET, newProgress, changeProgress, latestProgress, progressLines, type Progress } from "./progress.ts";
+import {chooseChecklistAction} from "./progress-review-ui.ts";
 import { savePlanMirror, cleanPlanMirror, pruneOldPlanMirrors } from "./plan-cache.ts";
 import { DELEGATION_ENTRY, DEFAULT_DELEGATION, normalizeDelegation,
   createDelegationSchedule, latestDelegation, subagentReady, scheduleInstructions,
@@ -2234,22 +2235,43 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("jev-progress", {
-    description:"Inspect current implementation step statuses and verification notes",
+    description:"Inspect all task statuses and verification notes in a scrollable view; toggle widget visibility",
     handler:async (_args,ctx)=>{
       const p=implementationProgress;
       if(!p){ctx.ui.notify("No Jev implementation checklist in this session.","info");return;}
+      const choice=await chooseChecklistAction(ctx,p);
+      // The agent may have reported newer progress while this dialog was open.
+      // Never overwrite its fresh step statuses with the stale UI snapshot.
+      const current=implementationProgress??p;
+      if(choice==="back")return;
+      if(choice==="toggle"){
+        saveProgress({...current,visible:!current.visible},ctx);
+        ctx.ui.notify("Jev checklist widget "+(!current.visible?"shown":"hidden")+
+          ". Use /jev-progress to view all tasks or change visibility.","info");
+        return;
+      }
+      if(choice?.startsWith("step:")){
+        const id=Number(choice.slice(5));
+        const step=current.steps.find(s=>s.id===id);
+        if(step)ctx.ui.notify("#"+step.id+" "+step.title+" · "+step.status+
+          (step.note?" · "+step.note:""),"info");
+        return;
+      }
+      // The legacy Pi selector still shows the complete checklist, but
+      // newer Pi builds use the bounded scroll viewer above.
       if(ctx.hasUI && ctx.ui.select){
-        const entries=p.steps.map(s=>(s.status==="done"?"☑":s.status==="active"?"◉":s.status==="blocked"?"!":"☐")+" "+s.id+". "+s.title.slice(0,85));
-        const choice=await ctx.ui.select("Jev implementation · "+p.stage,[
-          ...entries,"Dismiss checklist (keep history)","Back",
+        const entries=p.steps.map(s=>(s.status==="done"?"☑":s.status==="active"?"◉":s.status==="blocked"?"!":"☐")+
+          " "+s.id+". "+s.title.slice(0,85));
+        const toggle=p.visible?"Hide checklist widget":"Show checklist widget";
+        const chosen=await ctx.ui.select("Jev implementation · "+p.stage,[
+          ...entries,toggle,"Back"
         ]);
-        if(choice==="Dismiss checklist (keep history)") {
-          saveProgress({...p,visible:false},ctx);
-          return;
+        if(chosen===toggle)saveProgress({...current,visible:!current.visible},ctx);
+        else {
+          const i=entries.indexOf(chosen??"");
+          if(i>=0)ctx.ui.notify(p.steps[i].title+" · "+p.steps[i].status+
+            (p.steps[i].note?" · "+p.steps[i].note:""),"info");
         }
-        const i=entries.indexOf(choice??"");
-        if(i>=0)ctx.ui.notify(p.steps[i].title+" · "+p.steps[i].status+
-          (p.steps[i].note?" · "+p.steps[i].note:""),"info");
       }else ctx.ui.notify(progressLines(p,24).join("\n"),"info");
     },
   });

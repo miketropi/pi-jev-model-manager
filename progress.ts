@@ -53,14 +53,46 @@ export function latestProgress(entries:readonly any[]):Progress|undefined{
   if(entry?.type==="custom"&&entry.customType===PROGRESS_ENTRY&&Number.isInteger(entry.data?.version)&&Array.isArray(entry.data?.steps))return entry.data as Progress;
  }
 }
-export function progressLines(p:Progress,limit=6):string[]{
+export interface ProgressWindow {
+  start: number; end: number; focusId: number|undefined;
+  before: number; after: number;
+}
+/** A stable, bounded viewport that follows actual agent-reported task state.
+ * Explicit active wins; if none, show blockers, then the first pending task.
+ * A fully verified checklist remains positioned at its last task.
+ */
+export function progressWindow(p:Progress,limit=5):ProgressWindow {
+ const count=p.steps.length;
+ const slots=Math.max(1,Math.min(32,Number.isFinite(limit)?Math.floor(limit):5));
+ const focusIndex=Math.max(0,
+  p.steps.findIndex(s=>s.status==="active")>=0
+   ? p.steps.findIndex(s=>s.status==="active")
+   : p.steps.findIndex(s=>s.status==="blocked")>=0
+    ? p.steps.findIndex(s=>s.status==="blocked")
+    : p.steps.findIndex(s=>s.status==="pending")>=0
+     ? p.steps.findIndex(s=>s.status==="pending"):count-1);
+ const maxStart=Math.max(0,count-slots);
+ const start=Math.min(maxStart,Math.max(0,focusIndex-Math.floor((slots-1)/2)));
+ const end=Math.min(count,start+slots);
+ return {start,end,focusId:p.steps[focusIndex]?.id,
+  before:start,after:count-end};
+}
+export function progressLines(p:Progress,limit=5):string[]{
  const done=p.steps.filter(s=>s.status==="done").length;
- const rows=["JEV IMPLEMENT · "+done+"/"+p.steps.length+" · "+p.stage.toUpperCase()];
- for(const step of p.steps.slice(0,limit)){
+ const blocked=p.steps.filter(s=>s.status==="blocked");
+ const window=progressWindow(p,limit);
+ const current=window.focusId===undefined?"":(" · #"+window.focusId+"/"+p.steps.length);
+ const warning=blocked.length?" · ! "+blocked.length+" blocked":"";
+ const rows=["JEV IMPLEMENT · "+done+"/"+p.steps.length+" · "+p.stage.toUpperCase()+
+  current+warning];
+ for(const step of p.steps.slice(window.start,window.end)){
   const icon=step.status==="done"?"☑":step.status==="active"?"◉":step.status==="blocked"?"!":"☐";
   rows.push(icon+" "+step.id+". "+tidy(step.title).slice(0,68));
  }
- if(p.steps.length>limit)rows.push("… "+(p.steps.length-limit)+" more · /jev-progress");
- rows.push("/jev-progress · details | /jev-progress-clear · dismiss");
+ if(window.before||window.after)rows.push(
+  (window.before?"↑ "+window.before+" earlier":"")+
+  (window.before&&window.after?" · ":"")+
+  (window.after?"↓ "+window.after+" next":"")+" · /jev-progress");
+ rows.push("/jev-progress · all tasks | /jev-progress-clear · dismiss");
  return rows;
 }

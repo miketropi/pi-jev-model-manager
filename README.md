@@ -360,9 +360,24 @@ JEV IMPLEMENT · 2/4 · RUNNING
 
 The progress widget distinguishes **☑ verified**, **◉ current**, **☐ pending**, and **! blocked**. If the plan has no extractable steps it begins with one generic task; the agent can replace the list with precise steps before anything is marked done.
 
+**Long checklist UX (v0.11.2):** the live widget stays compact (up to **five tasks**, plus header, overflow hint and actions) and **automatically follows the task reported active by the agent**. Task #7, #10, #12 or #16 no longer disappears behind the fixed first six. Without an active task, focus moves to the first blocked task, then the earliest pending task. The header shows completed/total, focused task ID and blocker count; an overflow hint shows hidden items above/below.
+
+```text
+JEV IMPLEMENT · 8/12 · RUNNING · #9/12
+☑ 7. Verify API handlers
+☑ 8. Integrate payment gateway
+◉ 9. Test edge cases and rollback
+☐ 10. Run compatibility checks
+☐ 11. Document release notes
+↑ 6 earlier · ↓ 1 next · /jev-progress
+/jev-progress · all tasks | /jev-progress-clear · dismiss
+```
+
+**Full task inspector:** run `/jev-progress` to open a scrollable overview in supported Pi TUI builds. It starts at the current task, supports Up/Down, PageUp/PageDown, Home/End and Enter for the complete verification note. Press **V** to toggle the compact widget on/off without deleting progress; **Esc** closes the inspector. Older Pi TUI versions retain the complete native selection menu with a reversible hide/show action. The widget reports progress from `jev_progress`; Jev does not silently infer completion from tool calls.
+
 A new model-callable `jev_progress` tool updates the checklist during Implementation. The agent should call it before working on a new step and after verifying a completed step, supplying a factual completion note. **Jev never guesses completion from tool activity or the final assistant message.** If the agent stops with unfinished steps, the widget says **PAUSED**, preserving the current step across follow-ups and `/reload`. If the model fails to call the tool, the checklist will not progress automatically.
 
-- `/jev-progress` — inspect all steps and their verification notes or hide the widget.
+- `/jev-progress` — inspect all steps and verification notes in a bounded scroll viewer; hide/show the compact widget without losing progress.
 - `/jev-progress-clear` — stop/dismiss tracking and clean the temporary plan file.
 - `/jev-auto` — exit explicit workflow, dismiss checklist, clean temporary plan data.
 
