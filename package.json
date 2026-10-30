@@ -6,7 +6,8 @@
   "description": "Jev-based virtual model routing with native Pi model management dialogs",
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./index.ts",
+      "./context-extension.ts"
     ],
     "skills": [
       "./skills"
