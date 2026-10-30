@@ -18,7 +18,7 @@ test("/jev-scan imports a proxy model as a usable Pi provider and preserves its 
     assert.equal(url, "https://custom-gateway.example/api/v1/models");
     pass++;
     return new Response(JSON.stringify({ data: [
-      { id: "cc/claude-test", name: pass === 1 ? "Claude Test" : "Renamed upstream", context_window: 200000, max_tokens: 16000 },
+      { id: "cc/claude-sonnet-4-6", name: pass === 1 ? "Claude Test" : "Renamed upstream", context_window: 200000, max_tokens: 16000 },
     ] }), { status: 200 });
   }) as typeof fetch;
 
@@ -56,11 +56,13 @@ test("/jev-scan imports a proxy model as a usable Pi provider and preserves its 
     const savedPath = join(dir, "jev-model-manager.json");
     const first = JSON.parse(readFileSync(savedPath, "utf8"));
     assert.equal(first.models.length, 1);
-    assert.equal(first.models[0].key, "jev-9router/cc/claude-test");
+    assert.equal(first.models[0].key, "jev-9router/cc/claude-sonnet-4-6");
     assert.equal(first.models[0].contextWindow, 200000);
     assert.equal(first.models[0].reasoning, false);
-    assert.equal(first.fallback, "jev-9router/cc/claude-test");
-    assert.equal(providers["jev-9router"].models[0].id, "cc/claude-test");
+    assert.match(first.models[0].specialty,/Production coding/);
+    assert.match(first.models[0].avoid,/trivial/);
+    assert.equal(first.fallback, "jev-9router/cc/claude-sonnet-4-6");
+    assert.equal(providers["jev-9router"].models[0].id, "cc/claude-sonnet-4-6");
     assert.equal(providers["jev-9router"].baseUrl, "https://custom-gateway.example/api/v1");
     assert.equal(first.nineRouter.baseUrl, "http://127.0.0.1:20128/v1"); // override does not get persisted
     assert.equal(providers["jev-9router"].apiKey, "$NINEROUTER_API_KEY");

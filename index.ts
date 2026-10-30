@@ -7,6 +7,7 @@
  */
 import type { Message } from "@earendil-works/pi-ai";
 import { defaultTaskRules, normalizeTaskRules, applyTaskRule, subagentTaskType, filterModels, type TaskRules, type TaskType } from "./task-routing.ts";
+import { classifierModelGuidance, effectiveModelProfile, knownModelProfile } from "./model-profiles.ts";
 import { configureTaskRules } from "./task-ui.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "./workflow.ts";
 import { registerPlanningTools, fetchPublicText } from "./planning-tools.ts";
@@ -242,14 +243,7 @@ async function choose(
 
   // Jev makes a typed choice. Application code validates the answer and enforces policy.
   const criteria = Object.fromEntries(candidates.map((m, index) => [
-    `m${index}`,
-    [
-      `Model: ${m.label} (${m.key}).`,
-      `Best suited for: ${m.specialty || "general coding"}.`,
-      `Avoid for: ${m.avoid || "none specified"}.`,
-      `Relative cost: ${m.cost}.`,
-      "Prefer lower cost when capabilities are comparable; favor correctness for critical tasks.",
-    ].join(" "),
+    "m" + index, classifierModelGuidance(m),
   ]));
   try {
     const result = await ctx.modelRegistry.classify(classifier, {
@@ -356,6 +350,9 @@ function importNineRouterModel(config: Config, remote: DiscoveredModel): Managed
   const existing = config.models.find((m) => m.key === key);
   if (existing) return existing;
   const model = newNineRouterManagedModel(remote);
+  const hints = effectiveModelProfile(model);
+  model.specialty = hints.specialty;
+  model.avoid = hints.avoid;
   config.models.push(model);
   if (!config.fallback) config.fallback = model.key;
   return model;
@@ -848,11 +845,13 @@ async function scanAndImportNineRouter(pi: ExtensionAPI, ctx: ExtensionContext, 
 
 async function configureModel(ctx: ExtensionContext, config: Config, model: ManagedModel): Promise<boolean> {
   while (true) {
+    const known = knownModelProfile(model.key);
     const choice = await ctx.ui.select(`Manage ${model.label}`, [
       `Enabled: ${model.enabled ? "yes" : "no"}`,
       `Display name: ${model.label}`,
       `Specialty: ${model.specialty || "—"}`,
       `Avoid: ${model.avoid || "—"}`,
+      ...(known ? ["Curated profile: " + known.family + " / " + known.variant] : []),
       `Cost: ${model.cost}`,
       `Thinking: ${model.thinking}`,
       ...(model.key.startsWith(`${NINE_ROUTER_PROVIDER}/`) ? [
@@ -864,6 +863,12 @@ async function configureModel(ctx: ExtensionContext, config: Config, model: Mana
       "Remove from registry", "Back",
     ]);
     if (!choice || choice === "Back") return true;
+    if (choice.startsWith("Curated profile:") && known) {
+      ctx.ui.notify("Jev curated hint (" + known.family + ", " + known.tier + "):\n" +
+        "Suitable: " + known.specialty + "\nCaution: " + known.avoid +
+        "\nCustom Specialty/Avoid fields override these hints; this is not a benchmark.", "info");
+      continue;
+    }
     if (choice.startsWith("Enabled:")) model.enabled = !model.enabled;
     if (choice.startsWith("Display name:")) {
       const value = await ctx.ui.input("Display name", model.label);
@@ -1925,6 +1930,9 @@ export default function (pi: ExtensionAPI) {
               key, label: key, enabled: true, specialty: "General software engineering",
               avoid: "", cost: "balanced", thinking: "medium",
             };
+            const hints = effectiveModelProfile(model);
+            model.specialty = hints.specialty;
+            model.avoid = hints.avoid;
             config.models.push(model);
             if (!config.fallback) config.fallback = key;
             await configureModel(ctx, config, model);

@@ -740,6 +740,27 @@ The chosen candidate must be listed by `ctx.modelRegistry.getAvailable()` and, w
 - A low-confidence selection uses the configured fallback. Relative cost descriptions can influence Jev but aren't proof of live pricing or actual quality.
 - Do not run alongside another extension that auto-switches models unless you've designed precedence rules.
 
+## Built-in model routing profiles (v0.10.3)
+
+Jev includes **conservative, curated routing descriptions** for common model families. These hints are passed to the existing typed Jev classifier during model selection; they do not spawn additional model calls, download a live benchmark database, or create new models.
+
+| Family | Typical model names (match actual configured model IDs) | Jev routing guidance |
+| --- | --- | --- |
+| Claude | Opus / Fable / Mythos, Sonnet, Haiku | Complex architecture/long agent tasks → deep; production coding and review → balanced; quick extraction and small tasks → fast |
+| OpenAI / GPT | GPT-6 Astra, GPT-6 Sol / GPT-5.6 Sol, GPT-6 Luna, Codex | Hard reasoning and architecture → flagship; normal engineering → balanced; efficient short tasks → fast; Codex → repository coding |
+| DeepSeek | V4 Pro, V4 Flash / V4.1 Flash, legacy V3/R1 | Pro for complex implementation/review; Flash for faster coding and tool-use loops; legacy IDs require availability checks |
+| MiniMax | M2.5, M2.7, M3, M2.1 | Multi-step coding, workflow orchestration, refactoring, and economical day-to-day coding depending on variant |
+| Kimi | K2.5, K2.6, K2.7 Code, K3, K2 Thinking | Long-horizon tool-assisted work, code generation, and visual context where supported by the actual API |
+
+Profiles are **heuristics, not universal benchmark rankings or live API pricing**. Exact capabilities and costs can differ by provider/proxy. The configured **relative cost** and explicit task-model rules keep their existing precedence. Jev never selects an unconfigured or unavailable model just because a profile exists.
+
+- **Already-imported models:** Jev applies known profiles at classification time, including older entries with generic descriptions; no re-import or config overwrite.
+- **New Pi-catalog/9Router imports:** Jev seeds the editable \`Specialty\` and \`Avoid\` fields for recognized model IDs.
+- **Custom descriptions:** Specific user-written \`Specialty\` and \`Avoid\` always take priority over default hints. In \`/jev-models\`, choose an imported model and open **Curated profile** to inspect the matching hint.
+- **Unknown model IDs:** No speculative profile is invented; existing metadata drives routing.
+
+**Reference documentation (reviewed 2026-10-30):** [Anthropic model documentation](https://docs.anthropic.com/en/docs/about-claude/models/overview), [OpenAI API pricing/model families](https://platform.openai.com/pricing), [DeepSeek API updates](https://api-docs.deepseek.com/updates/), [MiniMax M2.5](https://www.minimax.io/models/text), [MiniMax M2.7](https://www.minimax.io/news/minimax-m27-en), [Kimi K2.5](https://github.com/MoonshotAI/Kimi-K2.5). Model capabilities and names evolve; edit descriptions as you gather evaluation results for your real workload.
+
 ## Tests
 
 On Node.js 22+, from the project directory:
