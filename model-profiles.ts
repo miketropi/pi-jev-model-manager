@@ -43,7 +43,7 @@ export function knownModelProfile(key:string):ModelProfile|undefined {
       return profile("OpenAI","flagship/deep","deep",
         "Hard reasoning, architecture tradeoffs, complex debugging, broad code review and long-running agentic work.",
         "Routine formatting and low-risk repetitive edits when inexpensive models suffice.");
-    if (/^gpt-6-(?:luna|mini|nano)\b|^gpt-4o-mini\b|^gpt-5(?:[.-]\d+)?-(?:mini|nano)\b/.test(slug))
+    if (/^gpt-6(?:[.-]\d+)?-(?:luna|mini|nano)\b|^gpt-4o-mini\b|^gpt-5(?:[.-]\d+)?-(?:luna|mini|nano)\b/.test(slug))
       return profile("OpenAI","fast/efficient","fast",
         "Fast classification, extraction, summarization, small code changes, simple explanations and repetitive assistant tasks.",
         "Security-critical review and large complex implementations without independent verification.");

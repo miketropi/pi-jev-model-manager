@@ -3,6 +3,7 @@ import type {Config,ManagedModel} from "../core/config.ts";
 import {fallbackModel} from "./selectors.ts";
 import {classifierModelGuidance} from "../model-profiles.ts";
 import {applyTaskRule} from "../task-routing.ts";
+import {enforcePlanningQuality} from "./planning-quality.ts";
 export interface Decision {model:string;task:string;probability:number;reason:string;suggested?:string;}
 export async function choose(
   prompt: string,
@@ -64,9 +65,16 @@ export async function choose(
     const jevModel = probability < config.minProbability ? base.key : picked.key;
     const rule = applyTaskRule(task, jevModel, base.key, candidates.map((m) => m.key),
       config.taskRules, taskProbability, config.minProbability);
-    return { model: rule.model, task, probability,
-      reason: rule.reason === "Jev auto" && probability < config.minProbability
-        ? "low confidence fallback" : rule.reason };
+    const confirmedPlan = task === "plan" && taskProbability >= config.minProbability
+      && (config.taskRules.plan?.mode ?? "auto") === "auto";
+    const guarded = confirmedPlan ? enforcePlanningQuality(rule.model,candidates) : undefined;
+    return { model: guarded?.model ?? rule.model, task, probability,
+      reason: guarded?.changed
+        ? "planning quality guard: " + guarded.reason
+        : guarded?.degraded
+          ? "planning quality warning: " + guarded.reason
+          : rule.reason === "Jev auto" && probability < config.minProbability
+            ? "low confidence fallback" : rule.reason };
   } catch (e) {
     if (signal?.aborted) throw e;
     return {
