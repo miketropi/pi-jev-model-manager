@@ -53,7 +53,8 @@ const checkContents = (paths) => {
     "runtime/orchestrator.ts", "runtime/workflow-controller.ts",
     "runtime/tool-handlers.ts", "runtime/lifecycle.ts",
     "commands/register.ts", "core/config.ts", "ui/configuration.ts",
-    "context/extension.ts", "context/store.ts", "docs/architecture.md"]) {
+    "context/extension.ts", "context/store.ts", "docs/architecture.md",
+    "assets/omp-team-worker.yml"]) {
     if (!paths.includes(folderName + "/" + required))
       throw Error("Missing from release archive: " + required);
   }

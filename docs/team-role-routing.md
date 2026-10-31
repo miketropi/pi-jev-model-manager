@@ -35,7 +35,7 @@ to know whether Plan Mode was inherited, requested or configured by default.
 Herdr accepts arguments after -- in agent start as arguments to the
 agent executable (see https://herdr.dev/docs/agent-automation/).
 
-    herdr agent start dev --kind omp --pane PANE_ID -- --model provider/efficient-coder --thinking medium
+    herdr agent start dev --kind omp --pane PANE_ID -- --model provider/efficient-coder --thinking medium --config /absolute/path/to/jev/assets/omp-team-worker.yml
 
 This is an illustration; get actual model, effort and CLI args from
 jev_team_route, and a real pane ID from Herdr. Use a fresh independent
@@ -59,3 +59,18 @@ A different orchestrator may consume the same structured role route
   to verify savings measure all child tokens, cost, and quality separately.
 - For high-risk reviews and complex tests, pass difficulty=hard
   or explicitly Force a suitable strong model.
+
+
+## OMP startup mode inheritance
+
+OMP plan.defaultOnStartup can make every fresh interactive agent start in read-only
+Plan Mode even when the child selects a physical model via --model. JEV now ships
+assets/omp-team-worker.yml with plan.defaultOnStartup: false. The OMP launch
+contract for all non-PM roles adds an absolute --config overlay path. The file
+is a process-local OMP override, not a global or project configuration mutation.
+PM may use Plan Mode for legitimate planning, so it is intentionally exempt.
+Other launchers should consume the returned argv array directly. Verify
+startup mode/model after launch; an explicit plan-yolo or higher-priority
+runtime override can still alter startup behavior.
+
+Reference: https://github.com/can1357/oh-my-pi/blob/main/docs/settings.md

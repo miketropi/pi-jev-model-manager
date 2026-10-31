@@ -103,6 +103,8 @@ export function herdrLaunchExample(agentName:string,paneId:string,kind:"pi"|"omp
   if(!/^[A-Za-z0-9][A-Za-z0-9:_-]{0,79}$/.test(paneId))throw Error("Invalid Herdr pane ID");
   if(!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{1,191}$/.test(route.model))
     throw Error("Unsafe model ID for CLI example");
+  const quote=(arg:string)=>/^[a-zA-Z0-9_./:-]+$/.test(arg)?arg:
+    "'"+arg.replaceAll("'","'\\''")+"'";
   return ["herdr","agent","start",agentName,"--kind",kind,"--pane",paneId,
-    "--",...route.cliArgs].join(" ");
+    "--",...route.cliArgs].map(quote).join(" ");
 }
