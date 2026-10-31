@@ -81,12 +81,18 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
         const registered=typeof pi.getAllTools==="function"
           ?new Set(pi.getAllTools().map(t=>t.name)):new Set<string>();
         const config=readConfig();
-        const candidates=[...pi.getActiveTools(),
+        if(env.workflowTask==="plan")await env.peers?.refresh(config.peerAdapters,true);
+        const candidates=[...pi.getActiveTools().filter(name=>
+            (name!==HERDR_PLAN_TOOL || env.peers?.ready("herdr")) &&
+            (name!==COLLABORATION_TOOL || env.peers?.anyReady(config.peerAdapters))),
           "jev_web_fetch","jev_ask_user",
-          ...(env.workflowTask==="plan"?[HERDR_PLAN_TOOL,COLLABORATION_TOOL]:[]),
+          ...(env.workflowTask==="plan" && env.peers?.ready("herdr")?[HERDR_PLAN_TOOL]:[]),
+          ...(env.workflowTask==="plan" && env.peers?.anyReady(config.peerAdapters)?[COLLABORATION_TOOL]:[]),
           ...config.toolGrants.map(g=>g.tool)];
         pi.setActiveTools(toolsForPhase([...new Set(candidates)].filter(x=>
-          pi.getActiveTools().includes(x)||registered.has(x)),
+          ((x!==HERDR_PLAN_TOOL || env.peers?.ready("herdr")) &&
+           (x!==COLLABORATION_TOOL || env.peers?.anyReady(config.peerAdapters))) &&
+          (pi.getActiveTools().includes(x)||registered.has(x))),
           env.workflowTask!,config.toolGrants));
       }
     }

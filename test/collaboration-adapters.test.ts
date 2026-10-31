@@ -51,7 +51,7 @@ test("untrusted templates and unsound placeholders do not become callable",()=>{
  // even if its argv has no injection.
  assert.equal(profiles[0].executable,"bridge");
 });
-test("generic collaboration tool uses independent argv arrays, and reports backend failures",async()=>{
+test("generic collaboration uses independent argv and treats offline backend as optional",async()=>{
  let externalTool:any;
  const calls:unknown[]=[];
  const profile=normalizePeerAdapters([{
@@ -75,6 +75,7 @@ test("generic collaboration tool uses independent argv arrays, and reports backe
  assert.equal((calls[0] as any).args.length,3);
  const failure=await externalTool.execute("2",{adapter:"custom_peer",action:"read",target:"architect"},
    undefined,undefined,{});
- assert.equal(failure.isError,true);
- assert.match(failure.content[0].text,/backend unreachable/);
+ assert.equal(failure.isError,undefined,"offline peer is optional, not a task error");
+ assert.match(failure.content[0].text,/Continue Planning locally/);
+ assert.doesNotMatch(failure.content[0].text,/backend unreachable/);
 });

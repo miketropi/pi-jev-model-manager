@@ -2,6 +2,9 @@ import { type TaskType } from "../task-routing.ts";
 import { registerPlanningTools } from "../planning-tools.ts";
 import { registerHerdrPlanningTool } from "../herdr-collaboration.ts";
 import { registerCollaborationTool } from "../collaboration-adapters.ts";
+import {PeerCapabilities} from "../peer-capabilities.ts";
+import {HERDR_PLAN_TOOL} from "../herdr-collaboration.ts";
+import {COLLABORATION_TOOL} from "../collaboration-adapters.ts";
 import { type PlanDocument } from "../plan-artifact.ts";
 import { type Progress } from "../progress.ts";
 import { type DelegationSchedule } from "../delegation.ts";
@@ -36,11 +39,30 @@ interface RouteState {
  */
 export default function (pi: ExtensionAPI) {
   resetJevling();
+  const peers=new PeerCapabilities();
   // Register read-only research and interactive choice tools at startup.
   if (typeof pi.registerTool === "function"){
     registerPlanningTools(pi);
-    registerHerdrPlanningTool(pi); // backwards-compatible alias
-    registerCollaborationTool(pi,()=>readConfig().peerAdapters);
+    registerHerdrPlanningTool(pi,undefined,peers); // backwards-compatible alias
+    registerCollaborationTool(pi,()=>readConfig().peerAdapters,undefined,peers);
+    pi.registerCommand("jev-peers-refresh",{
+      description:"Explicitly recheck optional peer services; no background spawning",
+      handler:async(_args,ctx)=>{
+        const config=readConfig();
+        await peers.refresh(config.peerAdapters,true);
+        if(workflowTask==="plan" && typeof pi.getAllTools==="function"){
+          const installed=new Set(pi.getAllTools().map(t=>t.name));
+          const active=pi.getActiveTools().filter(n=>
+            n!==HERDR_PLAN_TOOL && n!==COLLABORATION_TOOL);
+          const optional=[
+            ...(peers.ready("herdr")?[HERDR_PLAN_TOOL]:[]),
+            ...(peers.anyReady(config.peerAdapters)?[COLLABORATION_TOOL]:[])
+          ].filter(name=>installed.has(name));
+          pi.setActiveTools([...new Set([...active,...optional])]);
+        }
+        if(ctx.hasUI)ctx.ui.notify(peers.summary(config.peerAdapters),"info");
+      }
+    });
   }
   let lastDecision: Decision | undefined;
   let workflowTask: TaskType | undefined;
@@ -63,6 +85,7 @@ export default function (pi: ExtensionAPI) {
   let qaRecoveryToolsInjected: string[] = [];
 
   const { savePipeline, cancelPipeline, showProgress, saveProgress, closeProgress, showPlanSummary, savePlan, createImplementationSession, openPlan, changeWorkflow, runWorkflowCommand } = createWorkflowController(pi, {
+    peers,
     get workflowTask() { return workflowTask; },
     set workflowTask(value: TaskType | undefined) { workflowTask = value; },
     get toolsBeforeStrictPhase() { return toolsBeforeStrictPhase; },
@@ -97,7 +120,7 @@ export default function (pi: ExtensionAPI) {
 
   const health = new ModelHealth();
   const env = {
-    health,
+    health,peers,
     get lastDecision() { return lastDecision; },
     set lastDecision(value: Decision | undefined) { lastDecision = value; },
     get workflowTask() { return workflowTask; },

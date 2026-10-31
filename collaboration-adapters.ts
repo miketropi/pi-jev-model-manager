@@ -7,12 +7,16 @@ import {execFile} from "node:child_process";
 import {promisify} from "node:util";
 import type {ExtensionAPI} from "@earendil-works/pi-coding-agent";
 import {HERDR_PLAN_PREFIX} from "./herdr-collaboration.ts";
+import type {PeerCapabilities} from "./peer-capabilities.ts";
+import {probeSucceeded as probeResultHealthy,isPeerUnavailableError as peerUnavailable} from "./peer-probe.ts";
 
 export const COLLABORATION_TOOL="jev_collaborate";
 export type PeerAction="list"|"get"|"read"|"wait"|"prompt";
 export interface PeerCliAdapter {
  id:string; executable:string;
  commands:Partial<Record<PeerAction,string[]>>;
+ // Optional runtime marker prevents attaching to unrelated running sessions.
+ activation?:{environment:string;equals?:string};
 }
 export interface PeerRequest {
  adapter:string; action:PeerAction; target?:string;
@@ -57,8 +61,18 @@ export function normalizePeerAdapters(value:unknown):PeerCliAdapter[]{
    commands[action]=[...argv] as string[];
   }
   if(!Object.keys(commands).length)continue;
+  let activation:PeerCliAdapter["activation"];
+  if(r.activation && typeof r.activation==="object" && !Array.isArray(r.activation)){
+    const a=r.activation as Record<string,unknown>;
+    if(typeof a.environment!=="string" || !/^[A-Z][A-Z0-9_]{1,79}$/.test(a.environment) ||
+       (a.equals!==undefined &&
+        (typeof a.equals!=="string" || a.equals.length>80 ||
+         /[\x00-\x1f\x7f]/.test(a.equals))))continue;
+    activation={environment:a.environment,
+      ...(a.equals===undefined?{}:{equals:a.equals as string})};
+  }
   ids.add(r.id);
-  result.push({id:r.id,executable:r.executable,commands});
+  result.push({id:r.id,executable:r.executable,commands,...(activation?{activation}:{})});
  }
  return result;
 }
@@ -97,14 +111,15 @@ export const executePeerCommand:PeerRunner=async(executable,args,timeoutMs)=>{
   "Peer adapter returned no text. Use wait/read to inspect the existing agent.";
 };
 export function registerCollaborationTool(pi:ExtensionAPI,
- providers:()=>readonly PeerCliAdapter[],runner:PeerRunner=executePeerCommand):void{
+ providers:()=>readonly PeerCliAdapter[],runner:PeerRunner=executePeerCommand,
+ capabilities?:PeerCapabilities):void{
  pi.registerTool({
   name:COLLABORATION_TOOL,label:"Jev · Peer Collaboration",
-  description:"Protocol-adapter based read-only planning discussion with existing agents via installed CLIs. Use configured peerAdapters. No arbitrary shell, writes or spawning.",
+  description:"Optional read-only collaboration with verified-ready peer adapters. If no peers are ready, Plan locally; never start a peer service.",
   defaultActive:false,
-  promptSnippet:"Use jev_collaborate to list, discuss with, wait for and read existing trusted peers via a configured adapter.",
+  promptSnippet:"Only if verified-ready: jev_collaborate can query trusted existing peers. Otherwise Plan locally without probing.",
   promptGuidelines:[
-   "Use adapter=herdr for existing Herdr colleagues or another explicitly configured peerAdapters id.",
+   "Use ONLY verified-ready adapters; optional collaboration is never required for Planning. Unavailable peers are skipped, not an error.",
    "Send only read-only planning, research, design-review questions. Prompt returns after submission; wait/read separately.",
    "Do not ask peers to implement, run commands, write files or start processes. Their tools may have independent permissions."
   ],
@@ -118,14 +133,35 @@ export function registerCollaborationTool(pi:ExtensionAPI,
     timeoutMs:{type:"integer",minimum:1000,maximum:30000}
    }} as any,
   async execute(_id,params,_signal,_onUpdate,_ctx){
+   // Validate the user's request independently of backend status: a bad action,
+   // unregistered adapter or unsafe target is a real configuration/input issue.
+   let cmd:ReturnType<typeof buildPeerCommand>;
+   try{cmd=buildPeerCommand(params,providers());}
+   catch{return {isError:true,content:[{type:"text",text:
+     "Invalid peer request or unregistered adapter. Check peerAdapters configuration."}]};}
+   const id=String(params.adapter);
+   // Even direct/manual calls should fail softly when the optional backend is offline.
+   if(capabilities && !capabilities.ready(id)){
+    const status=await capabilities.probe(id,providers());
+    if(status!=="ready")return {content:[{type:"text",text:
+      "Optional peer integration unavailable. Continue Planning locally; no action required."}]};
+   }
    try {
-    const cmd=buildPeerCommand(params,providers());
-    return {content:[{type:"text",text:
-      (await runner(cmd.executable,cmd.argv,cmd.timeoutMs)).slice(0,20000)}]};
+    const output=await runner(cmd.executable,cmd.argv,cmd.timeoutMs);
+    if(capabilities && params.action==="list" && !probeResultHealthy(output)){
+      capabilities?.invalidate(id);
+      return {content:[{type:"text",text:
+        "Optional peer integration unavailable. Continue Planning locally; no action required."}]};
+    }
+    return {content:[{type:"text",text:output.slice(0,20000)}]};
    }catch(e){
-    return {isError:true,content:[{type:"text",text:"Peer collaboration error: "+
-      String(e instanceof Error?e.message:e).slice(0,500)+
-      ". Check the adapter command syntax and whether the peer is running."}]};
+    if(peerUnavailable(e)){
+      capabilities?.invalidate(id);
+      return {content:[{type:"text",text:
+        "Optional peer integration disconnected. Continue Planning locally; no action required."}]};
+    }
+    return {isError:true,content:[{type:"text",text:
+      "Peer collaboration request could not be completed. Check adapter configuration using /jev-peers-refresh."}]};
    }
   }
  } as any);

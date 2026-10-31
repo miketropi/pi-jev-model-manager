@@ -61,7 +61,9 @@ export function isReadOnlyShell(command: string): boolean {
   const words = s.split(/\s+/);
   const first = words[0];
   if (first === "pwd") return words.length === 1;
-  if(first==="herdr")return isReadOnlyHerdrShell(s);
+  // Peer CLI discovery is handled by the capability registry. Do not run
+  // optional peer binaries directly in strict Plan; they may be offline.
+  if(first==="herdr")return false;
   if (["ls", "rg", "grep", "cat", "head", "tail", "wc"].includes(first)) {
     return words.slice(1).every(w => !/^(?:-.*(?:delete|exec|output)|--color=always)$/.test(w));
   }
@@ -127,10 +129,10 @@ export function instructionsForTask(task: TaskType): string {
       "Do not implement, edit/create/delete files, run tests, install dependencies, invoke mutating tools or delegate changes.",
       "You MAY inspect source using read/search and tightly restricted read-only bash (git log, git diff, rg, cat), and MUST research fresh facts with jev_web_fetch or an available read-only web search tool. Do not guess dates, releases or versions.",
       "For any trusted agent orchestrator, use a registered read/communication capability tool. Unknown tools are denied until the user explicitly configures scoped toolGrants in Jev config; no agent may change its own permissions during Plan.",
-      "When running inside Herdr, you MAY collaborate with existing agents using jev_herdr (list, get, read, wait, prompt) for read-only research, architectural critique, and independent plan review. Never ask peer agents to edit files, run tests/commands, implement, or spawn other agents. Inspect and verify peer conclusions before incorporating them.",
-      "Plain Herdr agent list/get/read/wait introspection via bash is allowed in Plan; send agent prompts only with jev_herdr, not unrestricted Herdr CLI/shell commands.",
+      "Optional peer collaboration is used ONLY when Jev has verified an active peer service and exposed its tool. No peer availability is required to Plan; work locally otherwise. Never attempt to start peer services or repeatedly probe missing ones.",
+      "Use only exposed, verified peer tools for read-only collaboration. Do not invoke peer binaries through bash to discover availability. Unknown or unavailable peers must not interrupt Planning.",
       "When comparing alternatives or requiring a decision, CALL jev_ask_user with 2–8 concrete options and short descriptions. Do not dump A/B/C in prose expecting the user to type a reply.",
-      "CONTEXT-EFFICIENT RESEARCH: If pre-existing authorized read-only peers are configured, delegate at most two genuinely independent scoped research questions using jev_collaborate (list/prompt/wait/read); ask for findings, evidence file references and unresolved issues only, not full logs or complete competing plans. Never spawn unverified native write-capable children in Plan Mode. Perform sequential dependency decisions as Lead.",
+      "CONTEXT-EFFICIENT RESEARCH: Only if verified-ready peer collaboration tools are exposed, delegate up to two independent read-only questions. Request short findings and evidence references, not full logs. If no peer tool is active, research directly; this is normal and never a task blocker.",
       "Finish with a concise implementation checklist. Wait for an explicit /jev-implement before editing files.",
     ].join("\n"),
     implement: "Implement the request or previously approved plan. Inspect code, make necessary changes, run focused tests, validate results, and summarize changed files. Do not claim tests were run if they were not.",
