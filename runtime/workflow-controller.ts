@@ -307,6 +307,7 @@ export function createWorkflowController(pi: ExtensionAPI, env: WorkflowBindings
       const candidates=[
         ...baseline,
         "jev_web_fetch","jev_ask_user",
+        ...(task==="plan"?["jev_team_route"]:[]),
         ...(task==="plan" && env.peers?.ready("herdr")?[HERDR_PLAN_TOOL]:[]),
         ...(task==="plan" && env.peers?.anyReady(config.peerAdapters)?[COLLABORATION_TOOL]:[]),
         ...(task==="review" && env.autoPipeline?.phase==="review"?["jev_quality_gate"]:[]),

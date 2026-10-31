@@ -63,6 +63,10 @@ test("Jev task policy routes main turns and opt-in subagent spawns without overr
     const hub:any={subagent_type:"Plan",prompt:"Analyze dependency migration",description:"Plan migration"};
     await handlers.tool_call({toolName:"Agent",input:hub},ctx);
     assert.equal(hub.model,"test/strong","Pi subagents-hub Plan role should follow plan policy");
+    const dev:any={role:"dev",task:"Implement isolated API module"};
+    await handlers.tool_call({toolName:"agent_spawn",input:dev},ctx);
+    assert.equal(dev.model,"test/fast",
+      "Explicit Dev role must not be reclassified as premium Review/Plan");
     const manual:any={agent:"reviewer",task:"Review PR",model:"test/fast"};
     await handlers.tool_call({toolName:"agent_spawn",input:manual},ctx);
     assert.equal(manual.model,"test/fast","explicit model must never be overwritten");
