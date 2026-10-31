@@ -15,6 +15,7 @@ import type { ExtensionAPI, ModelRouteRequest } from "@earendil-works/pi-coding-
 import { readConfig } from "../core/config.ts";
 import { keyOf, physicalCandidates, resolveModel, fallbackModel, lastUserText } from "../routing/selectors.ts";
 import { choose, type Decision } from "../routing/choose.ts";
+import {planningPool, planningTier} from "../routing/planning-quality.ts";
 import { syncNineRouterProvider } from "../integrations/nine-router-provider.ts";
 import { isJevSelected, isRoutingActive, updateJevling, setPlanReviewActive, clearJevling, stopJevling, startJevling } from "../ui/mascot-controller.ts";
 import { activateJev } from "../ui/activation.ts";
@@ -32,6 +33,7 @@ const ROUTER_ID="auto";
 export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings): void {
   const { savePipeline, cancelPipeline, showProgress, saveProgress, closeProgress, showPlanSummary, savePlan, createImplementationSession, openPlan, changeWorkflow, runWorkflowCommand } = env;
   pi.on?.("session_start", async (event, ctx) => {
+    env.lastDecision = undefined;
     setPlanReviewActive(false); // a new Pi session cannot inherit an old modal
     clearJevling();
     stopJevling();
@@ -312,6 +314,8 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
   syncNineRouterProvider(pi, readConfig());
   syncJevCredentials(pi, readConfig());
 
+  let warnedWeakPlan = false;
+  let lastRoutedPhase: string | undefined;
   pi.registerVirtualModel<RouteState>({
     provider: ROUTER_PROVIDER,
     id: ROUTER_ID,
@@ -319,6 +323,10 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
     thinkingLevels: ["off", "low", "medium", "high", "xhigh"],
     async route(request: ModelRouteRequest<RouteState>, ctx) {
       const config = readConfig();
+      if (lastRoutedPhase !== env.workflowTask) {
+        warnedWeakPlan = false;
+        lastRoutedPhase = env.workflowTask;
+      }
       const allCandidates = physicalCandidates(config, ctx);
       if (!allCandidates.length) {
         throw new Error("Jev Manager: no eligible authenticated physical models. Run /jev-models.");
@@ -328,6 +336,16 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       const healthy = allCandidates.filter(m => env.health.isEligible(m.key, config.health));
       const fit = allowedCandidates(healthy, m => resolveModel(ctx, m.key), observed);
       const candidates = fit.models;
+      const planAuto = env.workflowTask === "plan" &&
+        (config.taskRules.plan?.mode ?? "auto") === "auto";
+      const pool = planAuto && candidates.length ? planningPool(candidates) : undefined;
+      const notifyDegraded = (modelKey: string, quality = pool) => {
+        if (!quality?.degraded || warnedWeakPlan || !ctx.hasUI || config.mode !== "auto") return;
+        warnedWeakPlan = true;
+        ctx.ui.notify("Jev Plan quality warning: " + quality.reason +
+          ". Selected " + modelKey + ". Add a deep/balanced planning model, " +
+          "or choose /jev-tasks -> Planning & Architecture -> Force a model.", "warning");
+      };
       const sticky = request.failed ?? request.previous;
 
       if (request.reason === "continuation" && sticky && allCandidates.some(m => m.key === keyOf(sticky.model))) {
@@ -347,8 +365,16 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
         if (problem && config.enabled && config.mode === "auto" && config.health.autoFailover) {
           const attempted = new Set([...(request.state?.attempted ?? []), failedKey]);
           const available = candidates.filter(m => !attempted.has(m.key));
-          const next = available.find(m => m.key === config.fallback) ?? available[0];
+          const planningRetry = available.length && (env.workflowTask === "plan" ||
+            request.state?.last?.task === "plan") &&
+            (config.taskRules.plan?.mode ?? "auto") === "auto"
+            ? planningPool(available) : undefined;
+          const next = planningRetry
+            ? planningRetry.candidates.find(m => m.key === config.fallback) ??
+              planningRetry.preferred
+            : available.find(m => m.key === config.fallback) ?? available[0];
           if (next) {
+            if (planningRetry) notifyDegraded(next.key,planningRetry);
             const decision: Decision = {
               model: next.key, task: request.state?.last.task ?? "unknown",
               probability: 0, reason: `health failover (${problem}) from ${failedKey}`,
@@ -370,11 +396,12 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
         return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
       }
       if (request.reason === "direct") {
-        const base = candidates.find(m => m.key === config.fallback) ?? candidates[0]
-          ?? fallbackModel(allCandidates, config);
+        const base = pool?.preferred ?? (candidates.find(m => m.key === config.fallback) ??
+          candidates[0] ?? fallbackModel(allCandidates, config));
         const forced = env.workflowTask ? selectExplicitModel(env.workflowTask, base.key, base.key,
           candidates.map(m => m.key), config.taskRules).model : base.key;
         const model = candidates.find(m => m.key === forced) ?? base;
+        if (planAuto) notifyDegraded(model.key);
         updateJevling(ctx, config, {
           mood: config.enabled ? "routing" : "disabled", model: model.label,
         });
@@ -383,16 +410,20 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       if (!candidates.length) {
         throw new Error("Jev Manager: all configured models are cooling down after provider errors. Run /jev-health to inspect or reset.");
       }
-      const base = fallbackModel(candidates, config);
+      const base = config.mode === "observe"
+        ? fallbackModel(candidates,config)
+        : pool?.preferred ?? fallbackModel(candidates, config);
       const prompt = lastUserText(request.messages);
       let decision: Decision;
       // Stable model for an ongoing explicit coding phase; avoid reclassification
       // between turns when the existing model is still eligible and fits context.
-      const previous = request.state?.last;
+      const previous = request.state?.last ?? env.lastDecision;
+      const affinityRule = env.workflowTask ? config.taskRules[env.workflowTask] : undefined;
       const affiliated = request.reason === "user" && env.workflowTask
-        && ["implement","debug","qa","review"].includes(env.workflowTask)
+        && ["plan","implement","debug","qa","review"].includes(env.workflowTask)
+        && (!affinityRule || affinityRule.mode === "auto")
         && previous?.task === env.workflowTask
-        ? candidates.find(m => m.key === previous.model) : undefined;
+        ? (pool?.candidates ?? candidates).find(m => m.key === previous.model) : undefined;
       if (affiliated) {
         decision = {model:affiliated.key,task:env.workflowTask!,probability:1,
           reason:"task-affinity continuation"};
@@ -405,15 +436,17 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
           decision = { model: chosen.model, task: env.workflowTask, probability: 1, reason: chosen.reason };
         } else {
           // Auto still lets Jev rank models, but may not reclassify the explicit phase.
+          const eligible = pool?.candidates ?? candidates;
           const auto = prompt
             ? await choose(`Task phase: ${env.workflowTask}. ${prompt}`, {
-                ...config, taskRules: defaultTaskRules(),
-              }, candidates, ctx, request.signal)
+                ...config, fallback: base.key, taskRules: defaultTaskRules(),
+              }, eligible, ctx, request.signal)
             : { model: base.key, task: env.workflowTask, probability: 0, reason: "empty text prompt" };
           const chosen = selectExplicitModel(env.workflowTask, auto.model, base.key,
             candidates.map(m => m.key), config.taskRules);
           decision = { model: chosen.model, task: env.workflowTask,
-            probability: auto.probability, reason: `explicit ${env.workflowTask} · ${auto.reason}` };
+            probability: auto.probability, reason: `explicit ${env.workflowTask} · ${auto.reason}` +
+              (pool?.restricted ? ` · ${pool.reason}` : "") };
         }
       } else {
         decision = prompt
@@ -423,6 +456,14 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       env.lastDecision = decision;
       const selected = config.mode === "observe" ? base : candidates.find((m) => m.key === decision.model) ?? base;
       const physical = resolveModel(ctx, selected.key);
+      if (planAuto) notifyDegraded(selected.key);
+      if (planAuto && config.mode === "observe" &&
+          planningTier(selected) === "fast" && ctx.hasUI && !warnedWeakPlan) {
+        warnedWeakPlan = true;
+        ctx.ui.notify("Jev Plan is in OBSERVE mode: model selection is advisory only. " +
+          "The configured fallback is fast-tier. Use /jev-tasks to force a planning model, " +
+          "or enable Jev auto routing.", "warning");
+      }
       if (!physical) throw new Error(`Jev Manager: ${selected.key} missing from model registry`);
       if (ctx.hasUI) {
         ctx.ui.setStatus("jev-manager", `Jev ${config.mode}: ${selected.label} · ${decision.task}`);

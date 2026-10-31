@@ -1,4 +1,5 @@
 import {modelCapacity,canDispatch,safeThinking} from "../routing/compatibility.ts";
+import {planningTier} from "../routing/planning-quality.ts";
 import {chooseListOption} from "../ui/list-picker.ts";
 import { type TaskType } from "../task-routing.ts";
 import { effectiveModelProfile } from "../model-profiles.ts";
@@ -436,6 +437,7 @@ export function registerCommands(pi: ExtensionAPI, env: CommandBindings): void {
         "Selected: "+(d?.model??"none"),
         "Routing: "+(d?.reason??"no decision yet"),
         "Thinking: "+(selected?safeThinking(selected,physical):"unknown"),
+        "Planning tier (heuristic): "+(selected?planningTier(selected):"unknown"),
         "Context observed: "+(usage?.tokens??"unknown")+" / "+(usage?.contextWindow??"unknown"),
         "Model context: "+(cap?.window??"unknown")+" ("+(cap?.provenance??"unknown")+")",
         "Max output: "+(cap?.output??"unknown"),
