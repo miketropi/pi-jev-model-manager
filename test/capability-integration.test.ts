@@ -44,7 +44,7 @@ test("third-party action-granted Pi/MCP tool is usable only in Plan and survives
   await events.session_start({},ctx);
   await commands["jev-plan"].handler("",ctx);
   assert.ok(active.includes("paseo_peer"),"trusted external tool is visible in Plan");
-  assert.ok(active.includes("jev_collaborate"));
+  assert.ok(!active.includes("jev_collaborate"),"optional unverified peer should not appear in Plan");
   assert.equal((await events.tool_call({toolName:"paseo_peer",
     input:{operation:"ask_peer",target:"architect"}},ctx))?.block,undefined);
   assert.equal((await events.tool_call({toolName:"paseo_peer",
@@ -61,7 +61,7 @@ test("third-party action-granted Pi/MCP tool is usable only in Plan and survives
   assert.ok(active.includes("paseo_peer"));
   await events.session_start({reason:"reload"},ctx);
   assert.ok(active.includes("paseo_peer"),"granted tool survives Pi session reload");
-  assert.ok(active.includes("jev_collaborate"));
+  assert.ok(!active.includes("jev_collaborate"),"optional unverified peer should not appear in Plan");
   await commands["jev-auto"].handler("",ctx);
   assert.deepEqual(active,original,"original tools restored, no Plan-only tools leaked");
  }finally{

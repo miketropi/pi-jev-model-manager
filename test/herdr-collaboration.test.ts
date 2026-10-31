@@ -6,7 +6,7 @@ import {
 } from "../herdr-collaboration.ts";
 import {isReadOnlyHerdrShell,canUseTool,toolsForPhase} from "../workflow.ts";
 
-test("Plan exposes only safe Herdr introspection and blocks shell injection and spawning",()=>{
+test("Plan blocks direct Herdr shell access; registered peer tools validate scoped actions",()=>{
  const safe=[
   "herdr agent list","herdr agent get architect",
   "herdr agent read w1:p1",
@@ -16,7 +16,8 @@ test("Plan exposes only safe Herdr introspection and blocks shell injection and 
  ];
  for(const cmd of safe){
   assert.equal(isReadOnlyHerdrShell(cmd),true,cmd);
-  assert.equal(canUseTool("plan","bash",{command:cmd}),true,cmd);
+  assert.equal(canUseTool("plan","bash",{command:cmd}),false,
+    "never bypass capability discovery through raw CLI: "+cmd);
  }
  for(const cmd of [
   "herdr agent prompt researcher 'write code'",
@@ -77,7 +78,7 @@ test("Herdr prompt uses argv only, appends mandatory read-only peer guidance, an
  assert.throws(()=>buildHerdrArgs({action:"prompt",target:"architect",prompt:"short"}),/12/);
  assert.throws(()=>buildHerdrArgs({action:"read",target:"foo;touch"}),/target/);
 });
-test("Pi tool registration exposes Herdr safely and returns clear errors on backend failure",async()=>{
+test("Pi tool registration exposes Herdr safely and handles offline backend without errors",async()=>{
  let extensionTool:any;
  registerHerdrPlanningTool({registerTool:(tool:any)=>extensionTool=tool} as any,
    async(args)=>{if(args[1]==="get")throw Error("socket unavailable");return "agent researcher idle";});
@@ -87,6 +88,7 @@ test("Pi tool registration exposes Herdr safely and returns clear errors on back
  assert.equal(list.isError,undefined);
  assert.match(list.content[0].text,/agent researcher idle/);
  const error=await extensionTool.execute("call2",{action:"get",target:"researcher"},undefined,undefined,{});
- assert.equal(error.isError,true);
- assert.match(error.content[0].text,/socket unavailable/);
+ assert.equal(error.isError,undefined,"optional unavailable peers do not fail the Plan");
+ assert.match(error.content[0].text,/Continue Planning locally/);
+ assert.doesNotMatch(error.content[0].text,/socket unavailable/);
 });

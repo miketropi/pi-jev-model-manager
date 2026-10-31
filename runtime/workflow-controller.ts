@@ -2,6 +2,7 @@ import { type TaskType } from "../task-routing.ts";
 import { WORKFLOW_ENTRY, isStrictPhase, toolsForPhase } from "../workflow.ts";
 import { HERDR_PLAN_TOOL } from "../herdr-collaboration.ts";
 import { COLLABORATION_TOOL } from "../collaboration-adapters.ts";
+import type {PeerCapabilities} from "../peer-capabilities.ts";
 import { PLAN_ENTRY, PLAN_MESSAGE, PLAN_UI_ENTRY, nextPlan, planPreview, implementationHandoff, type PlanDocument } from "../plan-artifact.ts";
 import { choosePlanReviewAction } from "../plan-review-ui.ts";
 import { MASCOT_WIDGET_KEY } from "../mascot.ts";
@@ -24,6 +25,7 @@ import { activateJev } from "../ui/activation.ts";
 const ROUTER_PROVIDER="jev-manager";
 const ROUTER_ID="auto";
 export interface WorkflowBindings {
+  peers?:PeerCapabilities;
   workflowTask: TaskType | undefined;
   toolsBeforeStrictPhase: string[] | undefined;
   planDocument: PlanDocument | undefined;
@@ -294,14 +296,19 @@ export function createWorkflowController(pi: ExtensionAPI, env: WorkflowBindings
     const nextStrict = isStrictPhase(task);
     if(nextStrict){
       if(!wasStrict)env.toolsBeforeStrictPhase=pi.getActiveTools();
-      const baseline=env.toolsBeforeStrictPhase??pi.getActiveTools();
+      const originalBaseline=env.toolsBeforeStrictPhase??pi.getActiveTools();
       const config=readConfig();
+      // A peer left active by a prior session is not proof its daemon is still up.
+      const baseline=originalBaseline.filter(name=>
+        (name!==HERDR_PLAN_TOOL || env.peers?.ready("herdr")) &&
+        (name!==COLLABORATION_TOOL || env.peers?.anyReady(config.peerAdapters)));
       const registered=typeof pi.getAllTools==="function"
         ?new Set(pi.getAllTools().map(tool=>tool.name)):new Set<string>();
       const candidates=[
         ...baseline,
         "jev_web_fetch","jev_ask_user",
-        ...(task==="plan"?[HERDR_PLAN_TOOL,COLLABORATION_TOOL]:[]),
+        ...(task==="plan" && env.peers?.ready("herdr")?[HERDR_PLAN_TOOL]:[]),
+        ...(task==="plan" && env.peers?.anyReady(config.peerAdapters)?[COLLABORATION_TOOL]:[]),
         ...(task==="review" && env.autoPipeline?.phase==="review"?["jev_quality_gate"]:[]),
         ...config.toolGrants.map(grant=>grant.tool)
       ];
@@ -324,6 +331,9 @@ export function createWorkflowController(pi: ExtensionAPI, env: WorkflowBindings
     if (!skipIdle) await ctx.waitForIdle?.();
     if (!await activateJev(pi, ctx)) return;
     if (!fromPipeline) cancelPipeline(ctx,"Switched task phase manually");
+    // Read-only, bounded capability probes run only on entering Plan.
+    // A missing optional peer never blocks local Planning or raises a warning.
+    if(task==="plan")await env.peers?.refresh(readConfig().peerAdapters,true);
     changeWorkflow(task);
     if (task === "implement" && env.planDocument?.status === "approved") {
       // QA repair is a separate, bounded correction workflow. Reusing the

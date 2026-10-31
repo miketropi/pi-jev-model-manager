@@ -900,3 +900,4 @@ The tests use simulated 9Router responses and a mock Pi extension API, not live 
 
 - https://github.com/decolua/9router/blob/master/README.md
 \nContext Intelligence v2: [runtime optimization, TypeSafe Jev strategy and profiling](docs/context-intelligence-v2.md).\n
+Optional peer discovery: [quiet Herdr / other CLI capability checks](docs/peer-capability-discovery.md).
