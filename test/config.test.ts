@@ -163,8 +163,10 @@ test("/jev-config saves credentials separately from policy and registers TypeSaf
       mode: "tui",
       ui: {
         select: async (_title: string, options: string[]) => {
-          const wanted = steps[n++];
-          const chosen = options.find((s) => s.startsWith(wanted));
+          const wanted = steps[n];
+          const chosen = options.find((s) => s.startsWith(wanted) || s.includes(". " + wanted));
+          if (!chosen && options.includes("Next page ▶")) return "Next page ▶";
+          if (chosen) n++;
           if (wanted === "Set / replace securely") {
             assert.ok(options.includes("Paste from system clipboard"), "Clipboard fallback missing from key settings");
           }

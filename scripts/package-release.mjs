@@ -13,8 +13,11 @@ const folderName = "pi-jev-model-manager";
 const archiveName = folderName + "-v" + pkg.version;
 const dist = join(root, "dist");
 const stage = join(dist, folderName);
+// Include module directories as a whole. Previously only root TS files were
+// packaged, which silently broke the extension after modularization.
+const runtimeDirs = ["core", "routing", "integrations", "context", "runtime", "commands", "ui"];
 const paths = ["package.json", "README.md",
-  "jev-model-manager.example.json", "assets", "skills",
+  "jev-model-manager.example.json", "assets", "skills", "docs", ...runtimeDirs,
   ...readdirSync(root).filter(p => p.endsWith(".ts") &&
     !p.endsWith(".test.ts"))];
 if (!paths.includes("index.ts") || !paths.includes("skills"))
@@ -27,6 +30,11 @@ for (const path of paths) {
   if (!existsSync(src)) throw Error("Required release input missing: " + path);
   cpSync(src, join(stage, path), { recursive: true });
 }
+// Smoke test the actual staged artifact, not just the source tree.
+execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e",
+  'const m=await import("./index.ts"); if(typeof m.default!=="function") throw Error("Invalid Pi entrypoint");'],
+  { cwd: stage, stdio: "pipe", timeout: 30_000 });
+
 const zip = archiveName + ".zip";
 const tgz = archiveName + ".tar.gz";
 for (const file of [zip, tgz, "SHA256SUMS"])
@@ -41,7 +49,11 @@ const checkContents = (paths) => {
       throw Error("Unsafe file in release archive: " + path);
   }
   for (const required of ["package.json", "index.ts", "README.md",
-    "skills/jev-plan-quality/SKILL.md"]) {
+    "skills/jev-plan-quality/SKILL.md",
+    "runtime/orchestrator.ts", "runtime/workflow-controller.ts",
+    "runtime/tool-handlers.ts", "runtime/lifecycle.ts",
+    "commands/register.ts", "core/config.ts", "ui/configuration.ts",
+    "context/extension.ts", "context/store.ts", "docs/architecture.md"]) {
     if (!paths.includes(folderName + "/" + required))
       throw Error("Missing from release archive: " + required);
   }

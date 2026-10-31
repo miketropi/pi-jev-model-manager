@@ -31,6 +31,17 @@ for (const file of sourceFiles) {
   if (check.status !== 0) errors.push("Syntax: " + relative(root, file) + "\n" +
     (check.stderr || check.stdout).slice(0, 1400));
 }
+// Validate the static import graph: syntax-only checks do not resolve files.
+for (const file of sourceFiles.filter(file => file.endsWith(".ts"))) {
+  const body = readFileSync(file, "utf8");
+  const dependencies = body.matchAll(/\bfrom\s*["'](\.{1,2}\/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']/g);
+  for (const dep of dependencies) {
+    const target = resolve(file, "..", dep[1] || dep[2]);
+    if (!target.startsWith(root + "/") || !existsSync(target)) {
+      errors.push("Unresolved relative import: " + relative(root, file) + " -> " + (dep[1] || dep[2]));
+    }
+  }
+}
 for (const file of files.filter(p => /\.(ts|mjs|js|yml|yaml|json)$/.test(p))) {
   const body = readFileSync(file, "utf8");
   if (/^(?:<<<<<<< |=======\s*$|>>>>>>> )/m.test(body))

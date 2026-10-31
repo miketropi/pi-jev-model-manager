@@ -101,10 +101,12 @@ test("plan completes into reviewable Markdown; edit then approve and implement i
   assert.ok(widget.length<=8);
   // Native Pi fallback provides a reversible hide/show toggle.
   const originalSelect=ctx.ui.select;
-  ctx.ui.select=async(_title,choices)=>choices.find(x=>x==="Hide checklist widget");
+  ctx.ui.select=async(_title,choices)=>choices.find(x=>x==="Hide checklist widget" || x.endsWith(". Hide checklist widget"))
+    ?? choices.find(x=>x==="Next page ▶");
   await commands["jev-progress"].handler("",ctx);
   assert.equal(status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1],undefined);
-  ctx.ui.select=async(_title,choices)=>choices.find(x=>x==="Show checklist widget");
+  ctx.ui.select=async(_title,choices)=>choices.find(x=>x==="Show checklist widget" || x.endsWith(". Show checklist widget"))
+    ?? choices.find(x=>x==="Next page ▶");
   await commands["jev-progress"].handler("",ctx);
   widget=status.filter(x=>x[0]==="jev-implementation-checklist").at(-1)?.[1];
   assert.ok(widget.some(x=>x.startsWith("◉ 10.")),"show restores current task");
