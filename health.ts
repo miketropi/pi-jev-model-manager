@@ -68,14 +68,41 @@ export function classifyModelFailure(
   if (/\b404\b.*model|model.*\b404\b|model.not.found|model.*(?:does.not.exist|not.available|not.found|deprecated|no.longer.supported)/.test(s)) return "missing";
 }
 
+export type DispatchIssueKind = "parameter" | "context" | "authentication" |
+  "rate_limit" | "provider_outage" | "network" | "model_missing" | "unknown";
+export interface DispatchIssue {model: string; kind: DispatchIssueKind; action: string; at: number;}
+/** Never expose provider error bodies: errors can contain prompts, auth headers or customer data. */
+export function describeDispatchIssue(message: string | undefined): Pick<DispatchIssue,"kind"|"action"> {
+  const s=(message || "").toLowerCase();
+  if (/context[ ._-]*(length|window|size|overflow)|maximum context|input.*too (long|large)|exceed.*context|prompt.*too long/.test(s))
+    return {kind:"context",action:"Use /compact, reduce loaded context, or choose a verified larger context window"};
+  if (/\b(?:400|422)\b|invalid.parameter|invalid.request|unsupported.*(parameter|thinking|reasoning|max_tokens|max_output_tokens)|max_tokens.*(invalid|exceed|must)|parameter.*(unsupported|invalid)/.test(s))
+    return {kind:"parameter",action:"Verify 9Router model context/output limits and reasoning settings in /jev-models"};
+  if (/\b(?:401|403)\b|unauthori[sz]ed|invalid.api.key|authentication.failed|permission.denied|forbidden/.test(s))
+    return {kind:"authentication",action:"Check provider credentials and permissions"};
+  if (/\b429\b|rate.limit|quota.exceed|resource.exhaust/.test(s))
+    return {kind:"rate_limit",action:"Check rate limits and quota; use a healthy compatible model"};
+  if (/\b(?:500|502|503|504|521|522|523|524)\b|unavailable|overload|upstream.*error/.test(s))
+    return {kind:"provider_outage",action:"Check provider status or use a compatible fallback"};
+  if (/timeout|timed.out|deadline.exceeded|network|econnreset|econnrefused|enotfound|dns|fetch.failed/.test(s))
+    return {kind:"network",action:"Check proxy connectivity and retry when available"};
+  if (/\b404\b.*model|model.not.found|model.*does.not.exist/.test(s))
+    return {kind:"model_missing",action:"Scan 9Router or update the configured model ID"};
+  return {kind:"unknown",action:"Inspect sanitized Pi provider diagnostics and model metadata"};
+}
+
 export class ModelHealth {
   private entries = new Map<string, RecordState>();
+  private lastIssue?: DispatchIssue;
   private lastError = new Map<string, { reason: FailureKind; at: number }>();
 
   reportFailure(
     key: string, stopReason: string | undefined, error: string | undefined,
     policy: HealthSettings, now = Date.now(),
   ): FailureKind | undefined {
+    if (stopReason === "error" && key) {
+      this.lastIssue = {model:key,...describeDispatchIssue(error),at:now};
+    }
     const reason = classifyModelFailure(stopReason, error);
     if (!reason || !policy.enabled || !key) return;
     const last = this.lastError.get(key);
@@ -123,11 +150,15 @@ export class ModelHealth {
     return keys.map(k => this.status(k, now));
   }
 
+  lastDispatchIssue(): DispatchIssue | undefined { return this.lastIssue; }
+
   reset(key?: string): void {
     if (key) {
+      if (this.lastIssue?.model === key) this.lastIssue = undefined;
       this.entries.delete(key);
       this.lastError.delete(key);
     } else {
+      this.lastIssue = undefined;
       this.entries.clear();
       this.lastError.clear();
     }

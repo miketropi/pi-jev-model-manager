@@ -1,3 +1,5 @@
+import { allowedCandidates, safeThinking } from "../routing/compatibility.ts";
+import { describeDispatchIssue } from "../health.ts";
 import { defaultTaskRules, applyTaskRule, subagentTaskType } from "../task-routing.ts";
 import { WORKFLOW_COMMANDS, WORKFLOW_ENTRY, isStrictPhase, toolsForPhase, canUseTool, instructionsForTask, selectExplicitModel } from "../workflow.ts";
 import { HERDR_PLAN_TOOL } from "../herdr-collaboration.ts";
@@ -321,7 +323,11 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       if (!allCandidates.length) {
         throw new Error("Jev Manager: no eligible authenticated physical models. Run /jev-models.");
       }
-      const candidates = allCandidates.filter(m => env.health.isEligible(m.key, config.health));
+      const observed = typeof ctx.getContextUsage === "function"
+        ? ctx.getContextUsage()?.tokens : undefined;
+      const healthy = allCandidates.filter(m => env.health.isEligible(m.key, config.health));
+      const fit = allowedCandidates(healthy, m => resolveModel(ctx, m.key), observed);
+      const candidates = fit.models;
       const sticky = request.failed ?? request.previous;
 
       if (request.reason === "continuation" && sticky && allCandidates.some(m => m.key === keyOf(sticky.model))) {
@@ -330,6 +336,11 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       }
       if (request.reason === "retry" && request.failed) {
         const failedKey = keyOf(request.failed.model);
+        const issue = describeDispatchIssue(request.failed.message?.errorMessage);
+        if (request.failed.message?.stopReason === "error" && issue.kind === "parameter") {
+          env.health.reportFailure(failedKey, "error", request.failed.message.errorMessage, config.health);
+          throw new Error("Jev: invalid provider model parameters. Run /jev-diagnose to verify model limits; stopped blind retry.");
+        }
         const problem = env.health.reportFailure(
           failedKey, request.failed.message.stopReason, request.failed.message.errorMessage, config.health,
         );
@@ -347,7 +358,7 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
             updateJevling(ctx, config, { mood: "recovery", task: decision.task, model: next.label });
             return {
               model: resolveModel(ctx, next.key)!,
-              thinkingLevel: next.thinking,
+              thinkingLevel: safeThinking(next, resolveModel(ctx, next.key)),
               state: { last: decision, attempted: [...attempted, next.key] },
             };
           }
@@ -367,7 +378,7 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
         updateJevling(ctx, config, {
           mood: config.enabled ? "routing" : "disabled", model: model.label,
         });
-        return { model: resolveModel(ctx, model.key)!, thinkingLevel: model.thinking };
+        return { model: resolveModel(ctx, model.key)!, thinkingLevel: safeThinking(model, resolveModel(ctx, model.key)) };
       }
       if (!candidates.length) {
         throw new Error("Jev Manager: all configured models are cooling down after provider errors. Run /jev-health to inspect or reset.");
@@ -375,7 +386,17 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       const base = fallbackModel(candidates, config);
       const prompt = lastUserText(request.messages);
       let decision: Decision;
-      if (env.workflowTask) {
+      // Stable model for an ongoing explicit coding phase; avoid reclassification
+      // between turns when the existing model is still eligible and fits context.
+      const previous = request.state?.last;
+      const affiliated = request.reason === "user" && env.workflowTask
+        && ["implement","debug","qa","review"].includes(env.workflowTask)
+        && previous?.task === env.workflowTask
+        ? candidates.find(m => m.key === previous.model) : undefined;
+      if (affiliated) {
+        decision = {model:affiliated.key,task:env.workflowTask!,probability:1,
+          reason:"task-affinity continuation"};
+      } else if (env.workflowTask) {
         const rule = config.taskRules[env.workflowTask];
         // Prefer/Force bypass Jev task classification: the explicit command is authoritative.
         if (rule && rule.mode !== "auto") {
@@ -411,7 +432,7 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
         task: decision.task,
         model: selected.label,
       });
-      return { model: physical, thinkingLevel: selected.thinking, state: { last: decision, attempted: [selected.key] } };
+      return { model: physical, thinkingLevel: safeThinking(selected, physical), state: { last: decision, attempted: [selected.key] } };
     },
   });
 
