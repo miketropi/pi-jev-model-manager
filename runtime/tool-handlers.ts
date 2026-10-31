@@ -1,3 +1,4 @@
+import {boundAgentReport} from "../context/subagent-brief.ts";
 import { changeProgress, progressLines } from "../progress.ts";
 import { cleanPlanMirror } from "../plan-cache.ts";
 import { DELEGATION_ENTRY, createDelegationSchedule, subagentReady, scheduleInstructions, nextDelegationWave, recordDelegationRun, fallbackDelegationToLead, delegatePrompt, type DelegationSchedule, type ProposedTask } from "../delegation.ts";
@@ -342,8 +343,9 @@ export function registerWorkflowTools(pi: ExtensionAPI, env: RuntimeBindings): v
         return {isError:false,content:[{type:"text",text:"Builder wave "+(index+1)+
           " reported · "+wave.tasks.map(t=>"#"+t.stepId).join(", ")+
           "\nLEAD MUST inspect changed files and tests before marking done.\n"+
-          content.slice(0,36000)}],
-          details:{wave:index+1,status:"reported",delegation:env.delegationSchedule,subagent:result?.details}};
+          boundAgentReport(content)}],
+          details:{wave:index+1,status:"reported",delegation:env.delegationSchedule,
+            reportChars:content.length,shortened:content.length>7500}};
       }catch(e){
         return {isError:true,content:[{type:"text",text:e instanceof Error?e.message:String(e)}]};
       }

@@ -1,3 +1,5 @@
+import {registerStrategyCommand} from "./strategy-command.ts";
+import {registerContextRuntime} from "./runtime-extension.ts";
 /** Opt-in context archive and retrieval; no mutation of Pi conversation history. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { archiveContext, DEFAULT_CONTEXT_CONFIG, loadContext, normalizeContextConfig, readContext, searchContext, type ContextKind } from "./store.ts";
@@ -16,6 +18,8 @@ function session(ctx: any): string {
 }
 const asText=(text:string)=>({content:[{type:"text" as const,text}]});
 export default function(pi: ExtensionAPI) {
+  registerContextRuntime(pi);
+  registerStrategyCommand(pi);
   pi.registerCommand("jev-context",{
     description:"Show context archive status, policy, and safe retrieval instructions",
     handler: async (_args,ctx)=>{
