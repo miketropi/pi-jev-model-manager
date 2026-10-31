@@ -64,6 +64,8 @@ test("Herdr launch contract passes independent per-role physical model selection
  assert.throws(()=>herdrLaunchExample("QA;shutdown","w1:p2","omp",r));
  assert.throws(()=>herdrLaunchExample("qa","w1:p2;bad","omp",r));
  assert.deepEqual(r.cliArgs,["--model",models[0].key,"--thinking","low"]);
+ const withSpace=herdrLaunchExample("qa","w1:p2","omp",{...r,cliArgs:[...r.cliArgs,"--config","/Users/Example Name/config.yml"]});
+ assert.match(withSpace,/--config '\/Users\/Example Name\/config\.yml'/);
 });
 
 

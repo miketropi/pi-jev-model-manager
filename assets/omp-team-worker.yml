@@ -1,0 +1,4 @@
+# Child-process-only OMP overlay. Do not change global/project configuration.
+# Work roles spawn with their own physical model + thinking launch arguments.
+plan:
+  defaultOnStartup: false

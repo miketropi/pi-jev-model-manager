@@ -1,3 +1,4 @@
+import {fileURLToPath} from "node:url";
 /** Role-aware launch advice; no external daemon or agent is spawned here. */
 import type {ExtensionAPI} from "@earendil-works/pi-coding-agent";
 import {readConfig} from "./core/config.ts";
@@ -33,13 +34,21 @@ export function registerTeamTools(pi:ExtensionAPI):void{
     const result=resolveTeamRole(args.role,difficulty,candidate,config.taskRules);
     if(!result.ok)return asText("Team model routing unavailable: "+result.error,true);
     const r=result.route;
+    // OMP may have plan.defaultOnStartup=true globally/project-wide.
+    // A shipped process-local overlay stops independent non-PM workers from
+    // inadvertently entering read-only Plan Mode on startup.
+    const platform=args.platform==="pi"?"pi":"omp";
+    const ompWorker=platform==="omp" && r.role!=="pm";
+    const workerOverlay=ompWorker
+      ?fileURLToPath(new URL("./assets/omp-team-worker.yml",import.meta.url)):undefined;
+    const flags=workerOverlay?[...r.cliArgs,"--config",workerOverlay]:[...r.cliArgs];
     return {content:[{type:"text" as const,text:JSON.stringify({
       role:r.role,task:r.task,model:r.model,modelLabel:r.modelLabel,
       relativeCost:r.cost,thinking:r.thinking,source:r.source,reason:r.reason,
-      degraded:r.degraded,cliArgs:r.cliArgs,
-      example:herdrLaunchExample(r.role,"PANE_ID",
-        args.platform==="pi"?"pi":"omp",r),
-      requirement:"Use --model at child launch, verify child mode/model after start; do not inherit Plan Mode. JEV cannot alter an external process retroactively.",
+      degraded:r.degraded,cliArgs:flags,
+      ...(workerOverlay?{workerModeOverlay:workerOverlay}:{}),
+      example:herdrLaunchExample(r.role,"PANE_ID",platform,{...r,cliArgs:flags}),
+      requirement:"Start the child with all returned CLI args. OMP worker overlay disables global/project plan.defaultOnStartup for this process only. Verify the child mode/model after startup; JEV cannot alter an external process retroactively.",
     },null,2)}]};
   }
  } as any);

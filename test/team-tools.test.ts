@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {mkdtempSync,rmSync,writeFileSync} from "node:fs";
+import {mkdtempSync,rmSync,writeFileSync,readFileSync,existsSync} from "node:fs";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {resolveTeamRole} from "../team-routing.ts";
@@ -33,8 +33,16 @@ test("team routing tool returns model-per-child launch args; never spawns a proc
   assert.equal(result.role,"qa");
   assert.equal(result.model,models[2].key);
   assert.match(result.example,/--kind omp --pane PANE_ID -- --model provider\/gpt-5.6-luna/);
+  assert.equal(result.cliArgs.at(-2),"--config");
+  assert.equal(result.cliArgs.at(-1),result.workerModeOverlay);
+  assert.ok(existsSync(result.workerModeOverlay));
+  assert.match(readFileSync(result.workerModeOverlay,"utf8"),/defaultOnStartup: false/);
+  const qaPi=await tool.execute("call",{role:"qa",platform:"pi"},undefined,undefined,ctx);
+  assert.equal(JSON.parse(qaPi.content[0].text).workerModeOverlay,undefined);
   const pm=await tool.execute("call",{role:"pm",platform:"omp"},undefined,undefined,ctx);
   assert.equal(JSON.parse(pm.content[0].text).model,models[1].key);
+  assert.equal(JSON.parse(pm.content[0].text).workerModeOverlay,undefined,
+    "PM may deliberately enter OMP Plan Mode");
   await commands["jev-team"].handler("",ctx);
   assert.match(notice,/qa: provider\/gpt-5.6-luna/);
   assert.doesNotMatch(notice,/spawned agents/);
