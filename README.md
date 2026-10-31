@@ -1,5 +1,7 @@
 # Pi Jev Model Manager — MVP
 
+**Reliability:** [Model compatibility and diagnostics](docs/model-reliability.md) — use `/jev-diagnose` when routing fails.
+
 **Architecture:** [Module boundaries and regression checks](docs/architecture.md). The entrypoint delegates to the runtime composition module, with separate lifecycle, workflow, commands, integrations, UI, and context components.
 
 ![Jev Model Manager — intelligent routing for Pi](https://pub-0645c3b9d3674132af6b362484df0f3c.r2.dev/jev-model-manager.png)

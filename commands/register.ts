@@ -1,3 +1,4 @@
+import {modelCapacity,canDispatch,safeThinking} from "../routing/compatibility.ts";
 import {chooseListOption} from "../ui/list-picker.ts";
 import { type TaskType } from "../task-routing.ts";
 import { effectiveModelProfile } from "../model-profiles.ts";
@@ -414,6 +415,39 @@ export function registerCommands(pi: ExtensionAPI, env: CommandBindings): void {
         (d ? `\nLast: ${d.task} → ${d.model}, p=${d.probability.toFixed(2)} (${d.reason})` : ""),
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("jev-diagnose", {
+    description: "Inspect model capabilities, observed context, and last sanitized provider error",
+    handler: async (_args,ctx) => {
+      const cfg=readConfig();
+      const d=env.lastDecision;
+      const selected=d && cfg.models.find(m=>m.key===d.model);
+      const physical=selected && ctx.modelRegistry.find(
+        selected.key.slice(0,selected.key.indexOf("/")),
+        selected.key.slice(selected.key.indexOf("/")+1));
+      const cap=selected ? modelCapacity(selected,physical) : undefined;
+      const usage=typeof ctx.getContextUsage==="function" ? ctx.getContextUsage() : undefined;
+      const issue=env.health.lastDispatchIssue();
+      const lines=[
+        "JEV Model Diagnostics",
+        "Task: "+(env.workflowTask??d?.task??"auto"),
+        "Selected: "+(d?.model??"none"),
+        "Routing: "+(d?.reason??"no decision yet"),
+        "Thinking: "+(selected?safeThinking(selected,physical):"unknown"),
+        "Context observed: "+(usage?.tokens??"unknown")+" / "+(usage?.contextWindow??"unknown"),
+        "Model context: "+(cap?.window??"unknown")+" ("+(cap?.provenance??"unknown")+")",
+        "Max output: "+(cap?.output??"unknown"),
+        "Switch capacity: "+(cap
+          ? canDispatch(usage?.tokens,cap)?"not excluded by guard":"insufficient for safe switch"
+          : "unknown"),
+        ...(cap?.warnings??[]).map(x=>"Warning: "+x),
+        "Last provider error: "+(issue?issue.kind+" on "+issue.model:"none observed"),
+        ...(issue?["Action: "+issue.action]:[]),
+        "9Router defaults are not verified provider capabilities.",
+      ];
+      ctx.ui.notify(lines.join("\n"),cap?.warnings.length || issue?"warning":"info");
     },
   });
 

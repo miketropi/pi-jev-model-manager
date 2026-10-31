@@ -30,6 +30,7 @@ export interface ManagedModel {
   vision?: boolean;
   contextWindow?: number;
   maxTokens?: number;
+  metadataSource?: "reported" | "assumed" | "manual"; // provider capability provenance
 }
 export interface Config {
   version: 1;

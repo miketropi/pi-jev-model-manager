@@ -151,7 +151,7 @@ export async function configureModel(ctx: ExtensionContext, config: Config, mode
       const value = await ctx.ui.input("Context window tokens", String(model.contextWindow ?? 128000));
       if (value != null) {
         const n = Number(value);
-        if (Number.isSafeInteger(n) && n > 0 && n <= 10_000_000 && n >= (model.maxTokens ?? 8192)) model.contextWindow = n;
+        if (Number.isSafeInteger(n) && n > 0 && n <= 10_000_000 && n >= (model.maxTokens ?? 8192)) { model.contextWindow = n; model.metadataSource = "manual"; }
         else ctx.ui.notify("Must be a positive integer at least as large as max output tokens (max 10M)", "warning");
       }
     }
@@ -159,7 +159,7 @@ export async function configureModel(ctx: ExtensionContext, config: Config, mode
       const value = await ctx.ui.input("Max output tokens", String(model.maxTokens ?? 8192));
       if (value != null) {
         const n = Number(value);
-        if (Number.isSafeInteger(n) && n > 0 && n <= (model.contextWindow ?? 128000)) model.maxTokens = n;
+        if (Number.isSafeInteger(n) && n > 0 && n <= (model.contextWindow ?? 128000)) { model.maxTokens = n; model.metadataSource = "manual"; }
         else ctx.ui.notify("Must be a positive integer no larger than context window", "warning");
       }
     }

@@ -15,6 +15,7 @@ export function newNineRouterManagedModel(remote: DiscoveredModel): ManagedModel
     vision: false,
     contextWindow: remote.contextWindow ?? 128_000,
     maxTokens: Math.min(remote.maxTokens ?? 8_192, remote.contextWindow ?? 128_000),
+    metadataSource: remote.contextWindow && remote.maxTokens ? "reported" : "assumed",
   };
 }
 
