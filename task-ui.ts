@@ -1,3 +1,4 @@
+import {chooseList} from "./ui/list-picker.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { TASK_TYPES, defaultTaskRules, filterModels, type ModelOption, type TaskRules, type TaskType } from "./task-routing.ts";
 
@@ -10,6 +11,15 @@ export const TASK_LABELS: Record<TaskType, string> = {
 export async function chooseSearchableModel(
   ctx: Pick<ExtensionContext, "ui">, models: readonly ModelOption[], initial = "",
 ): Promise<string | undefined> {
+  if ((ctx as any).mode === "tui" && typeof (ctx.ui as any).custom === "function") {
+    const picked = await chooseList(ctx as any, {
+      title: "Select task routing model",
+      initialQuery: initial,
+      items: models.map(model=>({id:model.key,label:model.label+"  ["+model.key+"]",
+        searchText:model.key})),
+    });
+    return picked?.id;
+  }
   let query = initial;
   while (true) {
     const matches = filterModels(models, query, 50);

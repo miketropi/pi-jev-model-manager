@@ -1,3 +1,4 @@
+import {chooseListOption} from "./list-picker.ts";
 import { configureTaskRules } from "../task-ui.ts";
 import { normalizeDelegation } from "../delegation.ts";
 import { ModelHealth } from "../health.ts";
@@ -28,7 +29,7 @@ export async function configureAddon(pi: ExtensionAPI, ctx: ExtensionContext, he
     const status9 = credentialSource("nineRouter", config.nineRouter.apiKeyEnv);
     const statusJev = credentialSource("jev", "TYPESAFE_API_KEY");
     const url = resolveNineRouterBaseUrl(config.nineRouter);
-    const choice = await ctx.ui.select("Jev Model Manager · Configuration", [
+    const choice = await chooseListOption(ctx, "Jev Model Manager · Configuration", [
       `9Router endpoint: ${url}${config.nineRouter.endpointSource === "saved" ? " [saved]" : process.env[NINE_ROUTER_BASE_URL_ENV]?.trim() ? " [env]" : ""}`,
       `9Router key: ${status9}`,
       `9Router key variable: ${config.nineRouter.apiKeyEnv}`,

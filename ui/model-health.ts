@@ -1,3 +1,4 @@
+import {chooseListOption} from "./list-picker.ts";
 import { filterModels } from "../task-routing.ts";
 import { ModelHealth } from "../health.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -22,12 +23,12 @@ export async function probeModelHealth(ctx: ExtensionContext, config: Config, he
   }
   const filter = await ctx.ui.input("Search model name, provider or ID (optional)", "");
   if (filter == null) return;
-  const matches = filterModels(models, filter, 50);
+  const matches = filterModels(models, filter, models.length);
   if (!matches.length) {
     ctx.ui.notify("No models match the search.", "warning");
     return;
   }
-  const selected = await ctx.ui.select("Run live model check · choose a model", matches.map(m => m.key));
+  const selected = await chooseListOption(ctx, "Run live model check · choose a model", matches.map(m => m.key));
   if (!selected) return;
   if (!await ctx.ui.confirm("Send a live 8-token test request?", "This incurs provider usage, tests only the chosen model, and may reveal its availability. No project files are sent.")) return;
   const model = resolveModel(ctx, selected);
@@ -88,10 +89,10 @@ export async function configureHealthOptions(ctx: ExtensionContext, config: Conf
       } else ctx.ui.notify("Enter an integer between 5 and 86400 seconds.", "warning");
     } else if (choice === "View model health" || choice.startsWith("Models cooling down:")) {
       const statuses = health.list(config.models.map(m => m.key));
-      const rows = statuses.slice(0, 70).map(s =>
+      const rows = statuses.map(s =>
         `${s.key}: ${s.status}${s.remainingSeconds ? ` (${s.remainingSeconds}s)` : ""}${s.reason ? ` [${s.reason}]` : ""}`
       );
-      await ctx.ui.select("Observed model health · last Pi requests", [...rows, "Back"]);
+      await chooseListOption(ctx, "Observed model health · last Pi requests", [...rows, "Back"]);
     } else if (choice === "Test one model now (uses a few tokens)") {
       await probeModelHealth(ctx, config, health);
     } else if (choice === "Clear all cooldowns") {

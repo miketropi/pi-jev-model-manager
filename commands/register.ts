@@ -1,3 +1,4 @@
+import {chooseListOption} from "../ui/list-picker.ts";
 import { type TaskType } from "../task-routing.ts";
 import { effectiveModelProfile } from "../model-profiles.ts";
 import { configureTaskRules } from "../task-ui.ts";
@@ -65,7 +66,7 @@ export function registerCommands(pi: ExtensionAPI, env: CommandBindings): void {
       let config = readConfig();
       while (true) {
         const names = config.models.map((m) => `${m.enabled ? "●" : "○"} ${m.label}  [${m.key}]`);
-        const choice = await ctx.ui.select("Jev Model Manager", [
+        const choice = await chooseListOption(ctx, "Jev Model Manager", [
           `Routing: ${config.enabled ? "ON" : "OFF"}`,
           `Mode: ${config.mode}`,
           `Fallback: ${config.fallback || "not set"}`,
@@ -86,7 +87,7 @@ export function registerCommands(pi: ExtensionAPI, env: CommandBindings): void {
         }
         else if (choice.startsWith("Mode:")) config.mode = config.mode === "auto" ? "observe" : "auto";
         else if (choice.startsWith("Fallback:")) {
-          const item = await ctx.ui.select("Select fallback", config.models.filter((m) => m.enabled).map((m) => m.key));
+          const item = await chooseListOption(ctx, "Select fallback", config.models.filter((m) => m.enabled).map((m) => m.key));
           if (item) config.fallback = item;
         } else if (choice.startsWith("Minimum probability:")) {
           const value = await ctx.ui.input("Minimum choice probability (0–1)", String(config.minProbability));
@@ -110,7 +111,7 @@ export function registerCommands(pi: ExtensionAPI, env: CommandBindings): void {
           const added = new Set(config.models.map((m) => m.key));
           const available = ctx.modelRegistry.getAvailable()
             .filter((m) => m.api !== "pi-virtual" && !added.has(keyOf(m)));
-          const key = await ctx.ui.select("Available Pi models", available.map(keyOf));
+          const key = await chooseListOption(ctx, "Available Pi models", available.map(keyOf));
           if (key) {
             const model: ManagedModel = {
               key, label: key, enabled: true, specialty: "General software engineering",
@@ -248,7 +249,7 @@ export function registerCommands(pi: ExtensionAPI, env: CommandBindings): void {
         const entries=p.steps.map(s=>(s.status==="done"?"☑":s.status==="active"?"◉":s.status==="blocked"?"!":"☐")+
           " "+s.id+". "+s.title.slice(0,85));
         const toggle=p.visible?"Hide checklist widget":"Show checklist widget";
-        const chosen=await ctx.ui.select("Jev implementation · "+p.stage,[
+        const chosen=await chooseListOption(ctx, "Jev implementation · "+p.stage,[
           ...entries,toggle,"Back"
         ]);
         if(chosen===toggle)env.saveProgress({...current,visible:!current.visible},ctx);

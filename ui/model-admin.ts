@@ -1,3 +1,4 @@
+import {chooseList,chooseListOption,matchedItems} from "./list-picker.ts";
 import { knownModelProfile } from "../model-profiles.ts";
 import { resolveSecret } from "../secrets.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -30,30 +31,53 @@ export async function scanAndImportNineRouter(pi: ExtensionAPI, ctx: ExtensionCo
   let filter = "";
   ctx.ui.notify(`Found ${discovered.length} 9Router IDs. Listing does not guarantee model availability or quota.`, "info");
   while (true) {
-    const matches = discovered.filter((m) => `${m.id} ${m.name}`.toLowerCase().includes(filter.toLowerCase()));
-    const imported = new Set(config.models.map((m) => m.key));
-    const unseen = matches.filter((m) => !imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`));
-    const selectionMap = new Map<string, DiscoveredModel>();
-    const rows = matches.slice(0, 60).map((m, i) => {
-      const label = `${imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`) ? "✓" : "+"} ${m.id} [${i + 1}]`;
-      selectionMap.set(label, m);
-      return label;
-    });
-    const choice = await ctx.ui.select(`9Router · ${matches.length} matching · ${unseen.length} new${matches.length > 60 ? " · first 60 shown" : ""}`, [
-      `Filter: ${filter || "all"}`,
-      `Import all ${unseen.length} new matching models (max 30)`,
-      ...rows,
-      "Back",
-    ]);
-    if (!choice || choice === "Back") return;
-    if (choice.startsWith("Filter:")) {
-      const value = await ctx.ui.input("Filter by model name or ID (blank = all)", filter);
-      if (value !== undefined) filter = value.trim();
-    } else if (choice.startsWith("Import all ")) {
+    const imported = new Set(config.models.map(m => m.key));
+    let remote: DiscoveredModel | undefined;
+    let bulkQuery = filter;
+    let bulk = false;
+    if (discovered.length <= 12 && !(ctx.mode === "tui" && typeof ctx.ui.custom === "function")) {
+      const matches = discovered.filter(m => `${m.id} ${m.name}`.toLowerCase().includes(filter.toLowerCase()));
+      const unseen = matches.filter(m => !imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`));
+      const labels = matches.map((m,i) =>
+        `${imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`) ? "✓" : "+"} ${m.id} [${i+1}]`);
+      const choice = await ctx.ui.select(`9Router · ${matches.length} matching · ${unseen.length} new`, [
+        `Filter: ${filter || "all"}`,
+        `Import all ${unseen.length} new matching models (max 30)`,
+        ...labels, "Back",
+      ]);
+      if (!choice || choice === "Back") return;
+      if (choice.startsWith("Filter:")) {
+        const next = await ctx.ui.input("Filter by model name or ID (blank = all)", filter);
+        if (next !== undefined) filter = next.trim();
+        continue;
+      }
+      bulk = choice.startsWith("Import all ");
+      if (!bulk) remote = matches[labels.indexOf(choice)];
+    } else {
+      const result = await chooseList(ctx, {
+        title: "9Router · model catalog",
+        initialQuery: filter,
+        items: discovered.map(m => ({
+          id: m.id,
+          label: `${imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`) ? "✓" : "+"} ${m.id}`,
+          searchText: m.name,
+        })),
+        actions: [{id:"@bulk",label:"Import matching new models (max 30)"}],
+      });
+      if (!result) return;
+      filter = result.query;
+      bulkQuery = result.query;
+      bulk = result.id === "@bulk";
+      if (!bulk) remote = discovered.find(m => m.id === result.id);
+    }
+    if (bulk) {
+      const matches = matchedItems(discovered.map(m=>({id:m.id,label:m.id,searchText:m.name})),bulkQuery);
+      const wanted = new Set(matches.map(m=>m.id));
+      const unseen = discovered.filter(m=>wanted.has(m.id) && !imported.has(`${NINE_ROUTER_PROVIDER}/${m.id}`));
       if (!unseen.length) {
         ctx.ui.notify("No new models matching the filter", "info");
       } else if (unseen.length > 30) {
-        ctx.ui.notify("Narrow the filter to 30 or fewer models before importing a batch. Large Jev candidate lists are inefficient.", "warning");
+        ctx.ui.notify("Narrow the filter to 30 or fewer models before importing a batch.", "warning");
       } else if (await ctx.ui.confirm("Import models?", `Add ${unseen.length} model(s) to Jev. You can edit capabilities later.`)) {
         for (const m of unseen) importNineRouterModel(config, m);
         saveConfig(config);
@@ -61,13 +85,12 @@ export async function scanAndImportNineRouter(pi: ExtensionAPI, ctx: ExtensionCo
         ctx.ui.notify(`Imported ${unseen.length} model(s). Use /jev-models to edit strengths and costs.`, "info");
       }
     } else {
-      const remote = selectionMap.get(choice);
       if (!remote) continue;
       const model = importNineRouterModel(config, remote);
       saveConfig(config);
       syncNineRouterProvider(pi, config);
       await configureModel(ctx, config, model);
-      syncNineRouterProvider(pi, config); // account for updated metadata or removal
+      syncNineRouterProvider(pi, config);
     }
   }
 }
@@ -75,7 +98,7 @@ export async function scanAndImportNineRouter(pi: ExtensionAPI, ctx: ExtensionCo
 export async function configureModel(ctx: ExtensionContext, config: Config, model: ManagedModel): Promise<boolean> {
   while (true) {
     const known = knownModelProfile(model.key);
-    const choice = await ctx.ui.select(`Manage ${model.label}`, [
+    const choice = await chooseListOption(ctx, `Manage ${model.label}`, [
       `Enabled: ${model.enabled ? "yes" : "no"}`,
       `Display name: ${model.label}`,
       `Specialty: ${model.specialty || "—"}`,

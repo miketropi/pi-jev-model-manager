@@ -1,3 +1,4 @@
+import { chooseListOption } from "./list-picker.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig, type Config } from "../core/config.ts";
 import { isJevSelected } from "./mascot-controller.ts";
@@ -37,7 +38,7 @@ export async function configureRoutingOptions(ctx: ExtensionContext, config: Con
     } else if (choice.startsWith("Fallback:")) {
       const models = config.models.filter(m => m.enabled).map(m => m.key);
       if (!models.length) ctx.ui.notify("Import or enable a model first with /jev-models.", "warning");
-      else config.fallback = await ctx.ui.select("Choose fallback", models) || config.fallback;
+      else config.fallback = await chooseListOption(ctx, "Choose fallback", models) || config.fallback;
     } else if (choice.startsWith("Classifier:")) {
       const provider = await ctx.ui.input("Classifier provider", config.classifier.provider);
       if (!provider?.trim()) continue;
