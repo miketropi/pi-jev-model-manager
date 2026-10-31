@@ -16,6 +16,7 @@ import { readConfig } from "../core/config.ts";
 import { keyOf, physicalCandidates, resolveModel, fallbackModel, lastUserText } from "../routing/selectors.ts";
 import { choose, type Decision } from "../routing/choose.ts";
 import {planningPool, planningTier} from "../routing/planning-quality.ts";
+import {normalizeTeamRole,resolveTeamRole} from "../team-routing.ts";
 import { syncNineRouterProvider } from "../integrations/nine-router-provider.ts";
 import { isJevSelected, isRoutingActive, updateJevling, setPlanReviewActive, clearJevling, stopJevling, startJevling } from "../ui/mascot-controller.ts";
 import { activateJev } from "../ui/activation.ts";
@@ -86,6 +87,7 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
             (name!==HERDR_PLAN_TOOL || env.peers?.ready("herdr")) &&
             (name!==COLLABORATION_TOOL || env.peers?.anyReady(config.peerAdapters))),
           "jev_web_fetch","jev_ask_user",
+          ...(env.workflowTask==="plan"?["jev_team_route"]:[]),
           ...(env.workflowTask==="plan" && env.peers?.ready("herdr")?[HERDR_PLAN_TOOL]:[]),
           ...(env.workflowTask==="plan" && env.peers?.anyReady(config.peerAdapters)?[COLLABORATION_TOOL]:[]),
           ...config.toolGrants.map(g=>g.tool)];
@@ -511,12 +513,20 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       .filter(m => env.health.isEligible(m.key, settings.health));
     if (!candidates.length) return;
     const role = subagentTaskType(input);
-    // Explicit agent roles apply to task policies; otherwise classify the task.
+    const rawTeamRole = [input.role,input.subagent_type,input.agent,input.agent_name]
+      .find((x):x is string=>typeof x==="string" && !!normalizeTeamRole(x));
+    const teamRole=rawTeamRole?normalizeTeamRole(rawTeamRole):undefined;
+    // A declared worker role has priority over the parent's Plan classifier.
+    // Do not trigger the Planning Quality Guard for a Dev/QA child.
+    const teamDecision=teamRole
+      ?resolveTeamRole(teamRole,"normal",candidates,settings.taskRules):undefined;
+    if(teamDecision && !teamDecision.ok)return;
     const decision = role && settings.taskRules[role].mode !== "auto"
       ? applyTaskRule(role, fallbackModel(candidates, settings).key,
           fallbackModel(candidates, settings).key, candidates.map(m => m.key), settings.taskRules)
       : null;
-    const model = decision?.model || (await choose(task, settings, candidates, ctx)).model;
+    const model = teamDecision?.ok ? teamDecision.route.model :
+      decision?.model || (await choose(task, settings, candidates, ctx)).model;
     if (!candidates.some(m => m.key === model)) return;
     // This intentionally touches only adapters with a documented model option.
     input.model = model;

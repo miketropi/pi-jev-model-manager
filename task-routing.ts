@@ -63,10 +63,13 @@ export function subagentTaskType(input: Record<string, unknown>): TaskType | und
   if (typeof explicit === "string" && TASK_TYPES.includes(explicit as TaskType)) return explicit as TaskType;
   const agent = typeof input.subagent_type === "string" ? input.subagent_type :
     typeof input.agent === "string" ? input.agent :
-    typeof input.agent_name === "string" ? input.agent_name : "";
+    typeof input.agent_name === "string" ? input.agent_name :
+    typeof input.role === "string" ? input.role : "";
   const a = agent.toLowerCase().replace(/[^a-z]/g, "");
   const aliases: Record<string, TaskType> = {
-    planner: "plan", architect: "plan", lead: "plan", plan: "plan", explore: "research", builder: "implement", worker: "implement",
+    planner: "plan", pm: "plan", projectmanager: "plan", architect: "plan",
+    lead: "plan", plan: "plan", orchestrator:"plan", explore: "research",
+    builder: "implement", worker: "implement", dev: "implement", developer: "implement",
     implementer: "implement", coder: "implement", debugger: "debug", fixer: "debug",
     reviewer: "review", verifier: "qa", qa: "qa", tester: "qa", auditor: "review", researcher: "research",
     scout: "research", searcher: "research", explainer: "explain",

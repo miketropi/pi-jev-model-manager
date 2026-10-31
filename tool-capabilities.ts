@@ -19,6 +19,7 @@ const CORE:ToolGrant[]=[
  ...["read","grep","find","ls","jev_web_fetch","web_search","web_fetch",
    "search_web","fetch_url"].map(tool=>({tool,capability:"read" as const,
       phases:["plan","qa","review"] as StrictPhase[]})),
+ {tool:"jev_team_route",capability:"read",phases:["plan","qa","review"]},
  {tool:"jev_ask_user",capability:"communicate",phases:["plan","review"]},
  {tool:"jev_quality_gate",capability:"verify",phases:["qa","review"]},
  {tool:"jev_herdr",capability:"delegate_research",phases:["plan"],
@@ -29,7 +30,7 @@ const CORE:ToolGrant[]=[
 export const RESTRICTED_TOOL_NAMES=new Set(["bash","write","edit","subagent",
   "Agent","agent_spawn","spawn_agent","subagent_spawn","jev_progress","jev_delegate",
   "jev_qa_triage","jev_qa_fix","jev_quality_gate","jev_web_fetch","jev_ask_user",
-  "jev_herdr","jev_collaborate","read","grep","find","ls"]);
+  "jev_herdr","jev_collaborate","jev_team_route","read","grep","find","ls"]);
 export const CAPABILITIES:Record<StrictPhase,ReadonlySet<Capability>>={
  plan:new Set(["read","communicate","delegate_research"]),
  qa:new Set(["read","verify"]),
