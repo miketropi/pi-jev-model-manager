@@ -1,3 +1,4 @@
+import {scopedPlanBrief} from "./context/subagent-brief.ts";
 /** Conservative planning for delegated Implementation work.
  * Pi subagent extension performs the actual spawning. Jev never executes
  * untrusted plans or marks parent checklist steps completed automatically.
@@ -197,7 +198,8 @@ export function delegatePrompt(step:ScheduledTask,approvedPlan:string):string {
   "You are a bounded coding Builder. Implement only this task and never change unrelated files.",
   "Allowed change scope: "+(step.files.length?step.files.join(", "):"unknown — do not start without clarifying scope"),
   "Dependencies already completed: "+(step.dependsOn.length?step.dependsOn.join(", "):"none"),
-  "Approved plan (source of truth):",approvedPlan.slice(0,12000),
+  "Approved plan (source of truth; scoped excerpt for long plans):",
+    scopedPlanBrief(approvedPlan,step.stepId,step.title,step.files).text,
   "Run focused tests. Do not commit or publish. Do not spawn other subagents.",
   "Report: files modified, tests actually run with outcomes, unresolved problems, and verification evidence.",
   "Do not call jev_progress; only the Lead may mark the parent checklist done."
@@ -213,9 +215,7 @@ export function scheduleInstructions(schedule:DelegationSchedule,plan:string):st
  }
  const current=schedule.waves[0];
  if(current?.execution==="builder"){
-  const tasks=current.tasks.map(t=>({agent:schedule.builderAgent,task:delegatePrompt(t,plan)}));
-  lines.push("Suggested native Pi subagent tool arguments:\n"+
-   JSON.stringify(tasks.length===1?tasks[0]:{tasks},null,2).slice(0,24000));
+  lines.push("Run next Builder wave via jev_delegate(action=run); the tool constructs scoped instructions on demand. Do not copy large plan text into the system prompt.");
  }
  return lines.join("\n");
 }
