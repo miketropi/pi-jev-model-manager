@@ -8,6 +8,7 @@ import {DEFAULT_HEALTH,normalizeHealthSettings,type HealthSettings} from "../hea
 import {normalizeMascotStyle,type MascotStyle} from "../mascot.ts";
 import {normalizeToolGrants,type ToolGrant} from "../tool-capabilities.ts";
 import {normalizePeerAdapters,type PeerCliAdapter} from "../collaboration-adapters.ts";
+import {DEFAULT_TEAM_SPAWN,normalizeTeamSpawn,type TeamSpawnPolicy} from "../team-spawn-policy.ts";
 
 export const CONFIG_PATH = join(
   process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
@@ -49,6 +50,7 @@ export interface Config {
   robotMotion: boolean;
   toolGrants:ToolGrant[];
   peerAdapters:PeerCliAdapter[];
+  teamSpawn:TeamSpawnPolicy;
 }
 const defaults = (): Config => ({
   version: 1,
@@ -67,6 +69,7 @@ const defaults = (): Config => ({
   robotMotion: true,
   toolGrants:[],
   peerAdapters:[],
+  teamSpawn:{...DEFAULT_TEAM_SPAWN},
 });
 
 export function readConfig(): Config {
@@ -88,6 +91,7 @@ export function readConfig(): Config {
       robotMotion: raw.robotMotion !== false,
       toolGrants:normalizeToolGrants(raw.toolGrants),
       peerAdapters:normalizePeerAdapters(raw.peerAdapters),
+      teamSpawn:normalizeTeamSpawn(raw.teamSpawn),
     };
   } catch (e) {
     throw new Error(`Invalid config ${CONFIG_PATH}: ${String(e)}`);

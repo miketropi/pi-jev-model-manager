@@ -30,7 +30,7 @@ const CORE:ToolGrant[]=[
 export const RESTRICTED_TOOL_NAMES=new Set(["bash","write","edit","subagent",
   "Agent","agent_spawn","spawn_agent","subagent_spawn","jev_progress","jev_delegate",
   "jev_qa_triage","jev_qa_fix","jev_quality_gate","jev_web_fetch","jev_ask_user",
-  "jev_herdr","jev_collaborate","jev_team_route","read","grep","find","ls"]);
+  "jev_herdr","jev_collaborate","jev_team_route","jev_team_spawn","read","grep","find","ls"]);
 export const CAPABILITIES:Record<StrictPhase,ReadonlySet<Capability>>={
  plan:new Set(["read","communicate","delegate_research"]),
  qa:new Set(["read","verify"]),

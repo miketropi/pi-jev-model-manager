@@ -45,5 +45,12 @@
   "nineRouter": {
     "baseUrl": "http://127.0.0.1:20128/v1",
     "apiKeyEnv": "NINEROUTER_API_KEY"
+  },
+  "teamSpawn": {
+    "enabled": false,
+    "maxAgents": 5,
+    "maxConcurrentStarts": 2,
+    "maxPremiumAgents": 1,
+    "maxCostUsdPerAgent": 0
   }
 }

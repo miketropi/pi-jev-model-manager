@@ -3,6 +3,7 @@ import { registerPlanningTools } from "../planning-tools.ts";
 import { registerHerdrPlanningTool } from "../herdr-collaboration.ts";
 import { registerCollaborationTool } from "../collaboration-adapters.ts";
 import {registerTeamTools} from "../team-tools.ts";
+import {registerTeamSpawnTools} from "../team-spawn-tools.ts";
 import {PeerCapabilities} from "../peer-capabilities.ts";
 import {HERDR_PLAN_TOOL} from "../herdr-collaboration.ts";
 import {COLLABORATION_TOOL} from "../collaboration-adapters.ts";
@@ -45,6 +46,7 @@ export default function (pi: ExtensionAPI) {
   if (typeof pi.registerTool === "function"){
     registerPlanningTools(pi);
     registerTeamTools(pi);
+    registerTeamSpawnTools(pi,{peers,getPhase:()=>workflowTask});
     registerHerdrPlanningTool(pi,undefined,peers); // backwards-compatible alias
     registerCollaborationTool(pi,()=>readConfig().peerAdapters,undefined,peers);
     pi.registerCommand("jev-peers-refresh",{

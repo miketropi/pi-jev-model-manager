@@ -903,3 +903,5 @@ The tests use simulated 9Router responses and a mock Pi extension API, not live 
 Optional peer discovery: [quiet Herdr / other CLI capability checks](docs/peer-capability-discovery.md).
 
 Multi-agent model routing: see docs/team-role-routing.md. Commands: /jev-team; read-only tool: jev_team_route.
+
+Team Spawn Controller: real controlled external launches via jev_team_spawn (Herdr adapter initially), with /jev-team-spawn-on, /jev-team-spawn-off and /jev-team-spawn-status. Guide: docs/team-spawn-controller.md.
