@@ -26,3 +26,9 @@ export function normalizeTeamSpawn(raw:unknown):TeamSpawnPolicy {
     x.maxCostUsdPerAgent:d.maxCostUsdPerAgent,
  };
 }
+
+/** Defensive interception of unmanaged Herdr launches when controller is ON.
+ * This is a policy guard, not a replacement for an OS permission sandbox. */
+export function isUnmanagedHerdrStart(command:unknown):boolean{
+ return typeof command==="string"&&/\bherdr\s+agent\s+start\b/i.test(command);
+}

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {HerdrSpawnAdapter,confirmedIdentity,type SpawnAdapter,type SpawnLookup}
  from "../team-spawn-adapters.ts";
 import {TeamSpawnController} from "../team-spawn-controller.ts";
-import {DEFAULT_TEAM_SPAWN,normalizeTeamSpawn} from "../team-spawn-policy.ts";
+import {DEFAULT_TEAM_SPAWN,normalizeTeamSpawn,isUnmanagedHerdrStart} from "../team-spawn-policy.ts";
 import {inferTeamDifficulty} from "../team-spawn-difficulty.ts";
 import {defaultTaskRules} from "../task-routing.ts";
 const models=[
@@ -163,4 +163,11 @@ test("TypeSafe Jev classifies only explicit scoped task summaries and fails safe
    stopReason:"stop",answers:{effort:{type:"choice",choice:"small",probabilities:{small:.3}}}
   })},cfg);
  assert.deepEqual(low,{difficulty:"normal",confidence:0,source:"default"});
+});
+
+test("unmanaged Herdr spawn shell commands are recognizable while ordinary reads are not",()=>{
+ assert.equal(isUnmanagedHerdrStart("herdr agent start qa --kind omp"),true);
+ assert.equal(isUnmanagedHerdrStart("/usr/local/bin/herdr   agent   start dev"),true);
+ assert.equal(isUnmanagedHerdrStart("herdr agent list"),false);
+ assert.equal(isUnmanagedHerdrStart("pwd"),false);
 });

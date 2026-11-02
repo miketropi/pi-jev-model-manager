@@ -76,6 +76,12 @@ test("Jev task policy routes main turns and opt-in subagent spawns without overr
     const unknown:any={agent:"reviewer",task:"Review PR"};
     await handlers.tool_call({toolName:"some_random_tool",input:unknown},ctx);
     assert.equal(unknown.model,undefined);
+    settings.teamSpawn={enabled:true,maxAgents:5,maxConcurrentStarts:2,
+      maxPremiumAgents:1,maxCostUsdPerAgent:0};
+    writeFileSync(join(path,"jev-model-manager.json"),JSON.stringify(settings));
+    const bypass=await handlers.tool_call({toolName:"bash",input:{command:"herdr agent start qa --kind omp --pane w1:p2"}},ctx);
+    assert.equal(bypass?.block,true,"controlled spawning must not be bypassed through shell");
+    assert.match(bypass?.reason,/jev_team_spawn/);
     settings.subagentRouting=false;
     writeFileSync(join(path,"jev-model-manager.json"),JSON.stringify(settings));
     const optOut:any={agent:"reviewer",task:"Review PR"};

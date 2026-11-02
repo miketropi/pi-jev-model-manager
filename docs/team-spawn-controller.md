@@ -79,7 +79,11 @@ confirms name/pane identity, not the backend model in the child.
 The receipt always has modelVerified=false.
 
 Strict Plan/Review/QA phases refuse spawns, and the controller checks this
-itself in addition to Pi tool permissions. Missing optional Herdr service
+itself in addition to Pi tool permissions. When the controller is enabled,
+the Pi tool_call guard also blocks direct bash commands containing
+Herdr agent start so an orchestrator cannot skip JEV limits by using
+a legacy CLI spawn path. This is not an OS sandbox: other processes
+that do not use JEV cannot be controlled by the extension. Missing optional Herdr service
 returns a neutral message and never exposes raw socket diagnostics.
 
 ## Extensibility
