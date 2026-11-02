@@ -54,7 +54,10 @@ const checkContents = (paths) => {
     "runtime/tool-handlers.ts", "runtime/lifecycle.ts",
     "commands/register.ts", "core/config.ts", "ui/configuration.ts",
     "context/extension.ts", "context/store.ts", "docs/architecture.md",
-    "assets/omp-team-worker.yml"]) {
+    "assets/omp-team-worker.yml",
+    "team-spawn-controller.ts","team-spawn-adapters.ts",
+    "team-spawn-policy.ts","team-spawn-tools.ts",
+    "team-spawn-difficulty.ts","docs/team-spawn-controller.md"]) {
     if (!paths.includes(folderName + "/" + required))
       throw Error("Missing from release archive: " + required);
   }

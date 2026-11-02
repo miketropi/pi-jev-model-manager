@@ -16,6 +16,7 @@ import { readConfig } from "../core/config.ts";
 import { keyOf, physicalCandidates, resolveModel, fallbackModel, lastUserText } from "../routing/selectors.ts";
 import { choose, type Decision } from "../routing/choose.ts";
 import {planningPool, planningTier} from "../routing/planning-quality.ts";
+import {isUnmanagedHerdrStart} from "../team-spawn-policy.ts";
 import {normalizeTeamRole,resolveTeamRole} from "../team-routing.ts";
 import { syncNineRouterProvider } from "../integrations/nine-router-provider.ts";
 import { isJevSelected, isRoutingActive, updateJevling, setPlanReviewActive, clearJevling, stopJevling, startJevling } from "../ui/mascot-controller.ts";
@@ -497,6 +498,11 @@ export function registerLifecycleEvents(pi: ExtensionAPI, env: RuntimeBindings):
       return { block: true, reason: `Jev ${env.workflowTask} is read-only. Use /jev-implement or /jev-auto before modifying files or running commands.` };
     }
     const settings = readConfig();
+    // When the operator opts into controlled spawning, prevent old shell
+    // workflows from silently bypassing per-role routing and budget caps.
+    if(settings.teamSpawn.enabled && event.toolName==="bash" &&
+      isUnmanagedHerdrStart((event.input as any)?.command))
+      return {block:true,reason:"Team Spawn Controller is enabled. Use jev_team_spawn to enforce role model, limits and idempotency; do not run herdr agent start via shell."};
     // Jev owns concurrency and scope during Implementation. Direct subagent
     // calls would bypass the scheduler; nested calls from jev_delegate are safe.
     if(env.workflowTask==="implement" && event.toolName==="subagent" &&
